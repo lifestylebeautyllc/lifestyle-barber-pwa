@@ -1,5 +1,4 @@
-import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom'
-import { Shield } from 'lucide-react'
+import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
 import BookingWizard from './pages/client/BookingWizard'
 import BarberCalendar from './pages/client/BarberCalendar'
 import AdminDashboard from './pages/admin/AdminDashboard'
