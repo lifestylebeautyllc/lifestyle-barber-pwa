@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+@theme {
+  /* Pitch black background */
+  --color-brand-900: #000000;
+  /* Sleek, dark gray for the Barber cards */
+  --color-brand-800: #121212;
+
+  /* Visible borders - much lighter than before */
+  --color-brand-700: #4B5563;
+  /* Highly readable gray for subtext */
+  --color-brand-muted: #9CA3AF;
+
+  /* Your vivid purple flame accent */
+  --color-brand-accent: #A855F7;
+
+  /* Clean white for primary text */
+  --color-brand-light: #F9FAFB;
+}
+
+html,
+body {
+  @apply bg-[var(--color-brand-900)] text-[var(--color-brand-light)] antialiased m-0 p-0;
+}
