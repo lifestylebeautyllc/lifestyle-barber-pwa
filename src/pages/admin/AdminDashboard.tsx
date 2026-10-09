@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, Check, UserX, Ban } from 'lucide-react'
+import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, Check, UserX, Ban, FileText } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { getAvailableSlots } from '../../lib/slotEngine'
 
@@ -155,7 +155,7 @@ export default function AdminDashboard() {
       if (!selectedBarberId || activeModule !== 'calendar' || calendarView !== 'day') return
       setLoadingAppts(true)
       const { data, error } = await supabase.from('appointments')
-        .select(`id, start_time, end_time, status, clients ( id, name, phone, notes )`)
+        .select(`id, start_time, end_time, status, notes, clients ( id, name, phone, notes )`)
         .eq('appointment_date', selectedDate)
         .eq('barber_id', selectedBarberId)
         .neq('status', 'cancelled')
@@ -193,7 +193,7 @@ export default function AdminDashboard() {
       const endOfWeek = `${endOfWeekDate.getFullYear()}-${String(endOfWeekDate.getMonth() + 1).padStart(2, '0')}-${String(endOfWeekDate.getDate()).padStart(2, '0')}`
 
       const [apptRes, overrideRes] = await Promise.all([
-        supabase.from('appointments').select('id, appointment_date, start_time, end_time, status, clients ( id, name, phone, notes )').eq('barber_id', selectedBarberId).gte('appointment_date', startOfWeek).lte('appointment_date', endOfWeek).neq('status', 'cancelled').order('start_time', { ascending: true }),
+        supabase.from('appointments').select('id, appointment_date, start_time, end_time, status, notes, clients ( id, name, phone, notes )').eq('barber_id', selectedBarberId).gte('appointment_date', startOfWeek).lte('appointment_date', endOfWeek).neq('status', 'cancelled').order('start_time', { ascending: true }),
         supabase.from('schedule_overrides').select('override_date, is_off').eq('barber_id', selectedBarberId).gte('override_date', startOfWeek).lte('override_date', endOfWeek)
       ])
       setWeekAppointments(apptRes.data || [])
@@ -516,8 +516,9 @@ export default function AdminDashboard() {
                 {appt.status === 'blocked' && <Lock className="w-3 h-3 inline mr-1 -mt-0.5" />}
                 {formatTime(appt.start_time)}
               </div>
-              <div className="text-xs truncate font-medium">
-                {appt.status === 'booked' || appt.status === 'completed' ? appt.clients?.name : appt.status.toUpperCase()}
+              <div className="text-xs truncate font-medium flex items-center gap-1">
+                <span className="truncate">{appt.status === 'booked' || appt.status === 'completed' ? appt.clients?.name : appt.status.toUpperCase()}</span>
+                {appt.notes && <FileText className="w-3 h-3 flex-shrink-0 opacity-70" />}
               </div>
             </button>
           )
@@ -933,6 +934,20 @@ export default function AdminDashboard() {
                      </a>
                    </div>
                  )}
+
+                 {/* Appointment Booking Notes */}
+                 <div className="space-y-2">
+                   <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider">Client Notes</label>
+                   {selectedAppt.notes ? (
+                     <div className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-white text-sm rounded-xl p-3">
+                       {selectedAppt.notes}
+                     </div>
+                   ) : (
+                     <div className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-[var(--color-brand-muted)] text-sm rounded-xl p-3 italic">
+                       No special notes provided.
+                     </div>
+                   )}
+                 </div>
 
                  {/* Cut Notes */}
                  <div className="space-y-2">

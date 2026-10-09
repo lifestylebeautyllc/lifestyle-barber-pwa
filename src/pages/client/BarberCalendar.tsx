@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Calendar as CalendarIcon, Clock, Scissors, User, Phone, CheckCircle2, CalendarPlus, Zap } from 'lucide-react'
+import { ArrowLeft, Calendar as CalendarIcon, Clock, Scissors, User, Phone, CheckCircle2, CalendarPlus, Zap, FileText } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { getAvailableSlots } from '../../lib/slotEngine'
 
@@ -50,6 +50,7 @@ export default function BarberCalendar() {
     const [clientPhone, setClientPhone] = useState('')
     const [isSubmitting, setIsSubmitting] = useState(false)
     const [bookingComplete, setBookingComplete] = useState(false)
+    const [notes, setNotes] = useState('')
 
     // 1. Fetch Data: Handles Specific Barber OR Shop-Wide Walk-In
     useEffect(() => {
@@ -143,7 +144,8 @@ export default function BarberCalendar() {
                 appointment_date: selectedDate,
                 start_time: startTimeStr,
                 end_time: endTimeStr,
-                status: isWalkIn ? 'walk-in' : 'booked' // Automatically tag iPad lobby bookings as Walk-Ins
+                status: isWalkIn ? 'walk-in' : 'booked', // Automatically tag iPad lobby bookings as Walk-Ins
+                notes: notes.trim() || null
             })
             if (apptErr) throw apptErr
 
@@ -307,6 +309,10 @@ export default function BarberCalendar() {
                         <div className="relative">
                             <Phone className="w-5 h-5 text-[var(--color-brand-muted)] absolute left-4 top-1/2 -translate-y-1/2" />
                             <input required type="tel" placeholder="Phone Number" value={clientPhone} onChange={(e) => setClientPhone(e.target.value)} className="w-full bg-[var(--color-brand-800)]/80 text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-xl p-4 pl-12 outline-none focus:border-[var(--color-brand-accent)] transition-colors backdrop-blur-md" />
+                        </div>
+                        <div className="relative">
+                            <FileText className="w-5 h-5 text-[var(--color-brand-muted)] absolute left-4 top-4" />
+                            <textarea placeholder="Notes for Barber (Optional)" value={notes} onChange={(e) => setNotes(e.target.value)} rows={3} className="w-full bg-[var(--color-brand-800)]/80 text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-xl p-4 pl-12 outline-none focus:border-[var(--color-brand-accent)] transition-colors backdrop-blur-md resize-none"></textarea>
                         </div>
                     </div>
 
