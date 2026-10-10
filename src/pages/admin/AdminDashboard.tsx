@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, Check, UserX, Ban, FileText } from 'lucide-react'
+import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, UserX, Trash2, FileText } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { getAvailableSlots } from '../../lib/slotEngine'
 
@@ -26,16 +26,28 @@ function generateMonthMatrix(year: number, month: number) {
 }
 
 // --- VAGARO-STYLE TIME-RAIL SETTINGS ---
-const CALENDAR_START_HOUR = 8
+const CALENDAR_START_HOUR = 9
 const CALENDAR_END_HOUR = 20
 const PIXELS_PER_MINUTE = 2
 
+const PIXELS_PER_HOUR = 60 * PIXELS_PER_MINUTE
+
+// Parses "HH:MM" or "HH:MM:SS" strictly — no padding, no rounding, no offsets.
+function parseTimeParts(timeStr: string): [number, number] {
+  const [h, m] = timeStr.trim().split(':')
+  return [parseInt(h, 10) || 0, parseInt(m, 10) || 0]
+}
+
+function toMinutes(timeStr: string) {
+  const [hours, minutes] = parseTimeParts(timeStr)
+  return hours * 60 + minutes
+}
+
 function timeToPixels(timeStr: string) {
   if (!timeStr) return 0
-  const [h, m] = timeStr.split(':').map(Number)
-  const absoluteMins = (h * 60) + m
-  const startMins = CALENDAR_START_HOUR * 60
-  return Math.max(0, (absoluteMins - startMins) * PIXELS_PER_MINUTE)
+  const [hours, minutes] = parseTimeParts(timeStr)
+  const pixelsPerHour = PIXELS_PER_HOUR
+  return Math.max(0, ((hours - CALENDAR_START_HOUR) * pixelsPerHour) + ((minutes / 60) * pixelsPerHour))
 }
 
 const timeLabels: string[] = []
@@ -59,7 +71,11 @@ export default function AdminDashboard() {
 
   // --- CALENDAR & GLOBAL STATE ---
   const [selectedBarberId, setSelectedBarberId] = useState<string>('')
-  const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().split('T')[0])
+  const [selectedDate, setSelectedDate] = useState(() => {
+    const d = new Date()
+    d.setMinutes(d.getMinutes() - d.getTimezoneOffset())
+    return d.toISOString().split('T')[0]
+  })
   const [appointments, setAppointments] = useState<any[]>([])
   const [loadingAppts, setLoadingAppts] = useState(false)
   const [adminServices, setAdminServices] = useState<any[]>([])
@@ -232,7 +248,7 @@ export default function AdminDashboard() {
     if (showBookModal && selectedBarberId && bookService && bookDate) {
       getAvailableSlots(selectedBarberId, bookDate, bookService.duration_minutes).then(setBookSlots)
     } else { setBookSlots([]) }
-    setBookTime('')
+    // NOTE: bookTime is intentionally NOT reset here so click-to-book pre-fill survives modal open.
   }, [showBookModal, selectedBarberId, bookService, bookDate])
 
   useEffect(() => {
@@ -272,19 +288,65 @@ export default function AdminDashboard() {
     if (!clientName || !clientPhone || !bookTime || !bookService) return
     setIsBooking(true)
     try {
-      let { data: existingClient } = await supabase.from('clients').select('id').eq('phone', clientPhone).maybeSingle()
-      let clientId = existingClient?.id
-      if (!clientId) {
-        const { data: newClient } = await supabase.from('clients').insert({ name: clientName, phone: clientPhone }).select().single()
-        clientId = newClient?.id
-      }
-      const [hours, minutes] = bookTime.split(':').map(Number)
-      const totalMinutes = hours * 60 + minutes + bookService.duration_minutes
-      const endTimeStr = `${Math.floor(totalMinutes / 60).toString().padStart(2, '0')}:${(totalMinutes % 60).toString().padStart(2, '0')}:00`
+      // --- DURATION-BASED COLLISION MATH (runs before any client writes) ---
+      const duration = Number(bookService.duration_minutes) || 0
+      const proposedStartTime = toMinutes(bookTime)
+      const proposedEndTime = proposedStartTime + duration
+      const endTimeStr = `${Math.floor(proposedEndTime / 60).toString().padStart(2, '0')}:${(proposedEndTime % 60).toString().padStart(2, '0')}:00`
 
+      const { data: conflicts, error: conflictErr } = await supabase
+        .from('appointments')
+        .select('clients ( name ), start_time, end_time')
+        .eq('barber_id', selectedBarberId)
+        .eq('appointment_date', bookDate)
+        .neq('status', 'cancelled')
+      if (conflictErr) throw conflictErr
+
+      if (conflicts) {
+        // 1. Proposed start lands inside an existing appointment
+        const startsInside = conflicts.find((c: any) => {
+          const cStart = toMinutes(c.start_time)
+          const cEnd = toMinutes(c.end_time)
+          return proposedStartTime >= cStart && proposedStartTime < cEnd
+        })
+        if (startsInside) {
+          const conflictName = (startsInside as any).clients?.name || 'Walk-In'
+          alert(`Hold up — ${conflictName} is already locked in at this time. Clear or shift that slot first before blocking it out.`)
+          return
+        }
+
+        // 2. Proposed duration block bleeds into a later appointment's start time
+        const bleedsIntoNext = conflicts.some((c: any) => {
+          const cStart = toMinutes(c.start_time)
+          return proposedStartTime < cStart && proposedEndTime > cStart
+        })
+        if (bleedsIntoNext) {
+          alert('Not enough time! This blocks runs into an existing appointment.')
+          return
+        }
+      }
+
+      // --- STEP A: Write the LIVE form state into `clients` and get its real id back ---
+      // `clients.phone` is UNIQUE, so a plain insert would 409 for a returning client.
+      // Upsert on phone inserts new clients and overwrites the name on existing ones — never a stale name.
+      const liveName = clientName.trim()
+      const livePhone = clientPhone.trim()
+      const { data: clientData, error: clientErr } = await supabase
+        .from('clients')
+        .upsert({ name: liveName, phone: livePhone }, { onConflict: 'phone' })
+        .select('id, name')
+        .single()
+      if (clientErr) throw clientErr
+      if (!clientData?.id) throw new Error('Client record was not returned by the database.')
+      if (clientData.name !== liveName) throw new Error(`Client name did not save (database still has "${clientData.name}").`)
+
+      // --- STEP B: Use the freshly returned client id — nothing cached, nothing hardcoded ---
+      // Only real `appointments` columns. Client name/phone live on `clients` (linked via client_id).
+      // end_time + appointment_date are NOT NULL in the schema and must be sent.
       const { error: apptErr } = await supabase.from('appointments').insert({
         barber_id: selectedBarberId,
-        client_id: clientId,
+        client_id: clientData.id,
+        service_id: bookService.id,
         appointment_date: bookDate,
         start_time: `${bookTime}:00`,
         end_time: endTimeStr,
@@ -321,7 +383,7 @@ export default function AdminDashboard() {
       }
 
       setShowBookModal(false); setBookService(null); setBookTime(''); setClientName(''); setClientPhone(''); setRefreshTrigger(prev => prev + 1)
-    } catch (error) { console.error(error); alert("Failed to book appointment.") }
+    } catch (error: any) { console.error(error); alert(`Failed to book appointment: ${error?.message || 'Unknown error'}`) }
     finally { setIsBooking(false) }
   }
 
@@ -363,6 +425,35 @@ export default function AdminDashboard() {
     if (!blockStart || !blockEnd) return
     setIsSavingOverride(true)
     try {
+      const { data: conflicts } = await supabase
+        .from('appointments')
+        .select('clients ( name ), start_time, end_time')
+        .eq('barber_id', selectedBarberId)
+        .eq('appointment_date', selectedDate)
+        .neq('status', 'cancelled')
+
+      if (conflicts) {
+        const [bSH, bSM] = blockStart.split(':').map(Number)
+        const [bEH, bEM] = blockEnd.split(':').map(Number)
+        const startMins = bSH * 60 + bSM
+        const endMins = bEH * 60 + bEM
+
+        const hasConflict = conflicts.find((c: any) => {
+          const [cH, cM] = c.start_time.split(':').map(Number)
+          const [cEH, cEM] = c.end_time.split(':').map(Number)
+          const cStart = cH * 60 + cM
+          const cEnd = cEH * 60 + cEM
+          return (startMins < cEnd && endMins > cStart)
+        })
+
+        if (hasConflict) {
+          const conflictName = (hasConflict as any).clients?.name || 'Walk-In'
+          alert(`Hold up — ${conflictName} is already locked in at this time. Clear or shift that slot first before blocking it out.`)
+          setIsSavingOverride(false)
+          return
+        }
+      }
+
       let { data: blockClient } = await supabase.from('clients').select('id').eq('phone', "0000000000").maybeSingle()
       let clientId = blockClient?.id
       if (!clientId) {
@@ -409,14 +500,33 @@ export default function AdminDashboard() {
     finally { setIsUpdatingAppt(false) }
   }
 
-  const handleUpdateStatus = async (newStatus: string) => {
-    if (!selectedAppt?.id) return
+  const handleDeleteAppt = async () => {
+    const appt = selectedAppt
+    if (!appt?.id) return
+    if (!confirm('Delete this appointment? It will be removed from the calendar.')) return
     setIsUpdatingAppt(true)
     try {
-      await supabase.from('appointments').update({ status: newStatus }).eq('id', selectedAppt.id)
+      // Soft-delete: RLS blocks hard DELETE. All time-rail fetches filter .neq('status', 'cancelled').
+      const { error } = await supabase.from('appointments').update({ status: 'cancelled' }).eq('id', appt.id)
+      if (error) throw error
       setShowApptModal(false)
+      setSelectedAppt(null)
       setRefreshTrigger(prev => prev + 1)
-    } catch (err) { console.error(err); alert("Failed to update status.") }
+    } catch (err) { console.error(err); alert("Failed to delete appointment.") }
+    finally { setIsUpdatingAppt(false) }
+  }
+
+  const handleNoShow = async () => {
+    const appt = selectedAppt
+    if (!appt?.id) return
+    setIsUpdatingAppt(true)
+    try {
+      const { error } = await supabase.from('appointments').update({ status: 'no-show' }).eq('id', appt.id)
+      if (error) throw error
+      setShowApptModal(false)
+      setSelectedAppt(null)
+      setRefreshTrigger(prev => prev + 1)
+    } catch (err) { console.error(err); alert("Failed to mark no-show.") }
     finally { setIsUpdatingAppt(false) }
   }
 
@@ -480,8 +590,8 @@ export default function AdminDashboard() {
       <div className="relative flex-1 border-r border-[var(--color-brand-700)] min-w-[120px]" style={{ height: `${(CALENDAR_END_HOUR - CALENDAR_START_HOUR) * 60 * PIXELS_PER_MINUTE}px` }}>
 
         {/* Grid Lines */}
-        {Array.from({ length: CALENDAR_END_HOUR - CALENDAR_START_HOUR }).map((_, i) => (
-          <div key={`grid-${i}`} className="absolute w-full border-b border-[var(--color-brand-700)]/40 pointer-events-none" style={{ top: `${(i + 1) * 60 * PIXELS_PER_MINUTE}px` }} />
+        {Array.from({ length: CALENDAR_END_HOUR - CALENDAR_START_HOUR + 1 }).map((_, i) => (
+          <div key={`grid-${i}`} className="absolute left-0 w-full h-0 m-0 p-0 box-border border-t border-[var(--color-brand-700)]/40 pointer-events-none" style={{ top: `${i * PIXELS_PER_HOUR}px` }} />
         ))}
 
         {/* Empty Tap-to-Book Slots */}
@@ -489,7 +599,7 @@ export default function AdminDashboard() {
           const totalMins = CALENDAR_START_HOUR * 60 + (i * 15)
           const timeStr = `${Math.floor(totalMins / 60).toString().padStart(2,'0')}:${(totalMins % 60).toString().padStart(2,'0')}`
           return (
-            <button key={`slot-${i}`} onClick={() => { setBookDate(gridDate); setBookTime(timeStr); setShowBookModal(true); }} className={`absolute w-full border-b border-[var(--color-brand-700)]/20 hover:bg-[var(--color-brand-accent)]/20 transition-colors z-10 ${isOff ? 'pointer-events-none opacity-0' : 'cursor-pointer'}`} style={{ top: `${(i * 15) * PIXELS_PER_MINUTE}px`, height: `${15 * PIXELS_PER_MINUTE}px` }} />
+            <button key={`slot-${i}`} onClick={() => { setBookDate(gridDate); setBookTime(timeStr); setShowBookModal(true); }} className={`absolute w-full m-0 box-border border-b border-[var(--color-brand-700)]/20 hover:bg-[var(--color-brand-accent)]/20 transition-colors z-10 ${isOff ? 'pointer-events-none opacity-0' : 'cursor-pointer'}`} style={{ top: `${(i * 15) * PIXELS_PER_MINUTE}px`, height: `${15 * PIXELS_PER_MINUTE}px` }} />
           )
         })}
 
@@ -498,14 +608,14 @@ export default function AdminDashboard() {
         {/* Dynamic Appointment Blocks */}
         {!isOff && gridAppts.map(appt => {
           const top = timeToPixels(appt.start_time)
-          const durationMins = (new Date(`1970-01-01T${appt.end_time}`).getTime() - new Date(`1970-01-01T${appt.start_time}`).getTime()) / 60000
+          const durationMins = Math.max(15, toMinutes(appt.end_time) - toMinutes(appt.start_time))
           const height = durationMins * PIXELS_PER_MINUTE
 
           return (
             <button
               key={appt.id}
               onClick={() => handleOpenAppt(appt)}
-              className={`absolute left-1 right-1 rounded-md p-2 overflow-hidden border shadow-md flex flex-col text-left z-20 cursor-pointer hover:brightness-110 transition-all ${
+              className={`absolute left-1 right-1 m-0 box-border rounded-md p-2 overflow-hidden border shadow-md flex flex-col text-left z-20 cursor-pointer hover:brightness-110 transition-all ${
                 appt.status === 'blocked' ? 'bg-orange-900/80 border-orange-500 text-orange-200' :
                 appt.status === 'completed' ? 'bg-green-900/80 border-green-500 text-green-200' :
                 'bg-[var(--color-brand-800)] border-[var(--color-brand-accent)] text-[var(--color-brand-light)]'
@@ -596,7 +706,7 @@ export default function AdminDashboard() {
                 <button onClick={() => setShowManageDayModal(true)} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] text-[var(--color-brand-light)] px-4 py-3 rounded-lg font-bold hover:border-[var(--color-brand-accent)] cursor-pointer transition-colors">
                   <SlidersHorizontal className="w-5 h-5" /> Manage
                 </button>
-                <button onClick={() => { setBookDate(selectedDate); setShowBookModal(true); }} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-[var(--color-brand-accent)] text-white px-4 py-3 rounded-lg font-bold hover:brightness-110 cursor-pointer">
+                <button onClick={() => { setBookDate(selectedDate); setBookTime(''); setShowBookModal(true); }} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-[var(--color-brand-accent)] text-white px-4 py-3 rounded-lg font-bold hover:brightness-110 cursor-pointer">
                   <Plus className="w-5 h-5" /> Book
                 </button>
               </div>
@@ -694,15 +804,17 @@ export default function AdminDashboard() {
                 </div>
                 <div className="flex-1 overflow-y-auto overflow-x-auto relative">
                   <div className="flex min-w-[max-content] md:min-w-full">
-                    <div className="w-16 flex-shrink-0 bg-[var(--color-brand-800)] border-r border-[var(--color-brand-700)] sticky left-0 z-30 pt-4">
-                      {timeLabels.map((label, i) => <div key={i} className="text-right pr-2 text-[10px] text-[var(--color-brand-muted)] font-bold -mt-2" style={{ height: `${60 * PIXELS_PER_MINUTE}px` }}>{label}</div>)}
+                    <div className="w-16 flex-shrink-0 bg-[var(--color-brand-800)] border-r border-[var(--color-brand-700)] sticky left-0 z-30 pt-4 pb-4">
+                      <div className="relative" style={{ height: `${(CALENDAR_END_HOUR - CALENDAR_START_HOUR) * PIXELS_PER_HOUR}px` }}>
+                        {timeLabels.map((label, i) => <div key={i} className="absolute right-0 pr-2 text-right text-[10px] leading-none text-[var(--color-brand-muted)] font-bold -translate-y-1/2 whitespace-nowrap" style={{ top: `${i * PIXELS_PER_HOUR}px` }}>{label}</div>)}
+                      </div>
                     </div>
                     {Array.from({ length: 7 }).map((_, i) => {
                       const d = new Date(viewWeekStartDate); d.setDate(d.getDate() + i)
                       const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
                       const dayAppts = weekAppointments.filter(a => a.appointment_date === dateStr)
                       const isOff = weekOverrides.find(o => o.override_date === dateStr)?.is_off
-                      return <div key={dateStr} className="flex-1 pt-4">{renderTimeGrid(dateStr, dayAppts, isOff)}</div>
+                      return <div key={dateStr} className="flex-1 pt-4 pb-4">{renderTimeGrid(dateStr, dayAppts, isOff)}</div>
                     })}
                   </div>
                 </div>
@@ -717,10 +829,12 @@ export default function AdminDashboard() {
                 </div>
                 <div className="flex-1 overflow-y-auto relative">
                   <div className="flex">
-                    <div className="w-16 flex-shrink-0 bg-[var(--color-brand-800)] border-r border-[var(--color-brand-700)] sticky left-0 z-30 pt-4">
-                      {timeLabels.map((label, i) => <div key={i} className="text-right pr-2 text-[10px] text-[var(--color-brand-muted)] font-bold -mt-2" style={{ height: `${60 * PIXELS_PER_MINUTE}px` }}>{label}</div>)}
+                    <div className="w-16 flex-shrink-0 bg-[var(--color-brand-800)] border-r border-[var(--color-brand-700)] sticky left-0 z-30 pt-4 pb-4">
+                      <div className="relative" style={{ height: `${(CALENDAR_END_HOUR - CALENDAR_START_HOUR) * PIXELS_PER_HOUR}px` }}>
+                        {timeLabels.map((label, i) => <div key={i} className="absolute right-0 pr-2 text-right text-[10px] leading-none text-[var(--color-brand-muted)] font-bold -translate-y-1/2 whitespace-nowrap" style={{ top: `${i * PIXELS_PER_HOUR}px` }}>{label}</div>)}
+                      </div>
                     </div>
-                    <div className="flex-1 pt-4">
+                    <div className="flex-1 pt-4 pb-4">
                       {loadingAppts ? <div className="p-8 text-[var(--color-brand-muted)] animate-pulse">Fetching...</div> : renderTimeGrid(selectedDate, appointments, isDayOff)}
                     </div>
                   </div>
@@ -972,18 +1086,14 @@ export default function AdminDashboard() {
                  {/* Status Toggles */}
                  <div className="space-y-2">
                    <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-3">Update Status</label>
-                   <div className="grid grid-cols-3 gap-2">
-                     <button onClick={() => handleUpdateStatus('completed')} disabled={isUpdatingAppt} className="flex flex-col items-center justify-center gap-1 py-4 rounded-xl border border-[var(--color-brand-700)] hover:bg-green-900/20 hover:border-green-500 hover:text-green-400 transition-colors cursor-pointer">
-                       <Check className="w-5 h-5" />
-                       <span className="text-xs font-bold">Complete</span>
-                     </button>
-                     <button onClick={() => handleUpdateStatus('no-show')} disabled={isUpdatingAppt} className="flex flex-col items-center justify-center gap-1 py-4 rounded-xl border border-[var(--color-brand-700)] hover:bg-red-900/20 hover:border-red-500 hover:text-red-400 transition-colors cursor-pointer">
+                   <div className="grid grid-cols-2 gap-2">
+                     <button onClick={handleNoShow} disabled={isUpdatingAppt} className="flex flex-col items-center justify-center gap-1 py-4 rounded-xl border border-[var(--color-brand-700)] hover:bg-red-900/20 hover:border-red-500 hover:text-red-400 transition-colors cursor-pointer">
                        <UserX className="w-5 h-5" />
                        <span className="text-xs font-bold">No-Show</span>
                      </button>
-                     <button onClick={() => handleUpdateStatus('cancelled')} disabled={isUpdatingAppt} className="flex flex-col items-center justify-center gap-1 py-4 rounded-xl border border-[var(--color-brand-700)] hover:bg-orange-900/20 hover:border-orange-500 hover:text-orange-400 transition-colors cursor-pointer">
-                       <Ban className="w-5 h-5" />
-                       <span className="text-xs font-bold">Cancel</span>
+                     <button onClick={handleDeleteAppt} disabled={isUpdatingAppt} className="flex flex-col items-center justify-center gap-1 py-4 rounded-xl border border-[var(--color-brand-700)] hover:bg-red-900/30 hover:border-red-600 hover:text-red-400 transition-colors cursor-pointer disabled:opacity-50">
+                       <Trash2 className="w-5 h-5" />
+                       <span className="text-xs font-bold">Delete</span>
                      </button>
                    </div>
                  </div>
@@ -999,7 +1109,7 @@ export default function AdminDashboard() {
            <div className="bg-[var(--color-brand-800)] w-full max-w-md rounded-2xl flex flex-col border border-[var(--color-brand-700)] shadow-2xl">
               <div className="flex items-center justify-between p-6 border-b border-[var(--color-brand-700)]">
                 <h2 className="text-xl font-bold">Manual Book</h2>
-                <button onClick={() => setShowBookModal(false)} className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer"><X className="w-6 h-6" /></button>
+                <button onClick={() => { setShowBookModal(false); setBookTime(''); }} className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer"><X className="w-6 h-6" /></button>
               </div>
               <form onSubmit={handleAdminBooking} className="p-6 space-y-4">
                  <select required value={bookService?.id || ''} onChange={(e) => setBookService(adminServices.find(s => s.id === e.target.value))} className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer text-white">
@@ -1008,8 +1118,9 @@ export default function AdminDashboard() {
                  </select>
                  <div className="grid grid-cols-2 gap-4">
                     <input type="date" required value={bookDate} onChange={(e) => setBookDate(e.target.value)} className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none [color-scheme:dark] cursor-pointer text-white" />
-                    <select required disabled={!bookService || bookSlots.length === 0} value={bookTime} onChange={(e) => setBookTime(e.target.value)} className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer disabled:opacity-50 text-white">
-                      <option value="" disabled>{bookSlots.length === 0 ? 'No slots' : 'Select time...'}</option>
+                    <select required value={bookTime} onChange={(e) => setBookTime(e.target.value)} className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer disabled:opacity-50 text-white">
+                      <option value="" disabled>{!bookService ? 'Select service first' : bookSlots.length === 0 ? 'No slots' : 'Select time...'}</option>
+                      {bookTime && !bookSlots.includes(bookTime) && <option value={bookTime}>{formatTime(bookTime)}</option>}
                       {bookSlots.map(time => <option key={time} value={time}>{formatTime(time)}</option>)}
                     </select>
                  </div>

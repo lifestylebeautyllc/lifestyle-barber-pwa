@@ -40,7 +40,11 @@ export default function BarberCalendar() {
     const [services, setServices] = useState<Service[]>([])
 
     const [selectedService, setSelectedService] = useState<Service | null>(null)
-    const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().split('T')[0])
+    const [selectedDate, setSelectedDate] = useState(() => {
+        const d = new Date()
+        d.setMinutes(d.getMinutes() - d.getTimezoneOffset())
+        return d.toISOString().split('T')[0]
+    })
 
     const [slots, setSlots] = useState<SlotObj[]>([])
     const [loadingSlots, setLoadingSlots] = useState(false)
@@ -122,14 +126,19 @@ export default function BarberCalendar() {
         setIsSubmitting(true)
 
         try {
-            let { data: existingClient } = await supabase.from('clients').select('id').eq('phone', clientPhone).maybeSingle()
-            let clientId = existingClient?.id
-
-            if (!clientId) {
-                const { data: newClient, error: clientErr } = await supabase.from('clients').insert({ name: clientName, phone: clientPhone }).select().single()
-                if (clientErr) throw clientErr
-                clientId = newClient.id
-            }
+            // --- STEP A: Write the LIVE form state into `clients` and get its real id back ---
+            // `clients.phone` is UNIQUE, so a plain insert would 409 for a returning client.
+            // Upsert on phone inserts new clients and overwrites the name on existing ones — never a stale name.
+            const liveName = clientName.trim()
+            const livePhone = clientPhone.trim()
+            const { data: clientData, error: clientErr } = await supabase
+                .from('clients')
+                .upsert({ name: liveName, phone: livePhone }, { onConflict: 'phone' })
+                .select('id, name')
+                .single()
+            if (clientErr) throw clientErr
+            if (!clientData?.id) throw new Error('Client record was not returned by the database.')
+            if (clientData.name !== liveName) throw new Error(`Client name did not save (database still has "${clientData.name}").`)
 
             const [hours, minutes] = selectedSlot.time.split(':').map(Number)
             const totalMinutes = hours * 60 + minutes + selectedService!.duration_minutes
@@ -138,9 +147,10 @@ export default function BarberCalendar() {
             const startTimeStr = `${selectedSlot.time}:00`
             const endTimeStr = `${endHours.toString().padStart(2, '0')}:${endMins.toString().padStart(2, '0')}:00`
 
+            // --- STEP B: Use the freshly returned client id — nothing cached, nothing hardcoded ---
             const { error: apptErr } = await supabase.from('appointments').insert({
                 barber_id: selectedSlot.barberId,
-                client_id: clientId,
+                client_id: clientData.id,
                 appointment_date: selectedDate,
                 start_time: startTimeStr,
                 end_time: endTimeStr,
@@ -162,9 +172,13 @@ export default function BarberCalendar() {
                 console.error("SMS Dispatch Failed:", smsErr)
             }
 
+            setClientName('')
+            setClientPhone('')
+            setNotes('')
             setBookingComplete(true)
-        } catch (error) {
-            alert("Error securing your appointment. Please try again.")
+        } catch (error: any) {
+            console.error("Booking failed:", error)
+            alert(`Error securing your appointment. Please try again.${error?.message ? `\n\n(${error.message})` : ''}`)
         } finally {
             setIsSubmitting(false)
         }
@@ -217,7 +231,15 @@ export default function BarberCalendar() {
                     <button onClick={handleAddToCalendar} className="w-full bg-[var(--color-brand-accent)] text-white flex items-center justify-center gap-2 px-8 py-4 rounded-xl hover:brightness-110 transition-all font-bold shadow-[0_0_20px_rgba(168,85,247,0.3)] cursor-pointer">
                         <CalendarPlus className="w-5 h-5" /> Add to Calendar
                     </button>
-                    <button onClick={() => navigate('/')} className="w-full bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] text-[var(--color-brand-light)] px-8 py-4 rounded-xl hover:border-[var(--color-brand-accent)] transition-all font-semibold cursor-pointer">
+                    <button onClick={() => {
+                        setSelectedSlot(null)
+                        setClientName('')
+                        setClientPhone('')
+                        setNotes('')
+                        setSelectedService(null)
+                        setBookingComplete(false)
+                        navigate('/')
+                    }} className="w-full bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] text-[var(--color-brand-light)] px-8 py-4 rounded-xl hover:border-[var(--color-brand-accent)] transition-all font-semibold cursor-pointer">
                         Return to Home
                     </button>
                 </div>
@@ -285,7 +307,7 @@ export default function BarberCalendar() {
                             <div className="grid grid-cols-3 gap-3">
                                 {slots.map((slot, index) => (
                                     <button key={`${index}-${slot.barberId}`} onClick={() => setSelectedSlot(slot)} className="bg-[var(--color-brand-800)]/90 backdrop-blur-sm border border-[var(--color-brand-700)] text-[var(--color-brand-light)] font-medium p-3 rounded-xl hover:bg-[var(--color-brand-accent)] hover:border-[var(--color-brand-accent)] hover:text-[var(--color-brand-900)] transition-all shadow-sm cursor-pointer flex flex-col items-center justify-center gap-1">
-                                        <span className="text-lg">{slot.time}</span>
+                                        <span className="text-lg">{formatTime(slot.time)}</span>
                                         {isWalkIn && <span className="text-[10px] uppercase font-bold tracking-widest opacity-70">{slot.barberName}</span>}
                                     </button>
                                 ))}
