@@ -28,9 +28,11 @@ function generateMonthMatrix(year: number, month: number) {
 // --- VAGARO-STYLE TIME-RAIL SETTINGS ---
 const CALENDAR_START_HOUR = 9
 const CALENDAR_END_HOUR = 20
-const PIXELS_PER_MINUTE = 2
-
-const PIXELS_PER_HOUR = 60 * PIXELS_PER_MINUTE
+const PIXELS_PER_HOUR = 80 // Condensed Vagaro scale: 80px/hr (20px per 15-min slot)
+const PIXELS_PER_MINUTE = PIXELS_PER_HOUR / 60
+const TOTAL_HOURS = CALENDAR_END_HOUR - CALENDAR_START_HOUR
+const TOTAL_RAIL_HEIGHT = TOTAL_HOURS * PIXELS_PER_HOUR
+const SLOT_HEIGHT = PIXELS_PER_HOUR / 4 // 20px
 
 // Parses "HH:MM" or "HH:MM:SS" strictly — no padding, no rounding, no offsets.
 function parseTimeParts(timeStr: string): [number, number] {
@@ -46,13 +48,14 @@ function toMinutes(timeStr: string) {
 function timeToPixels(timeStr: string) {
   if (!timeStr) return 0
   const [hours, minutes] = parseTimeParts(timeStr)
-  const pixelsPerHour = PIXELS_PER_HOUR
-  return Math.max(0, ((hours - CALENDAR_START_HOUR) * pixelsPerHour) + ((minutes / 60) * pixelsPerHour))
+  return Math.max(0, ((hours - CALENDAR_START_HOUR) * PIXELS_PER_HOUR) + ((minutes / 60) * PIXELS_PER_HOUR))
 }
 
-const timeLabels: string[] = []
-for (let i = CALENDAR_START_HOUR; i <= CALENDAR_END_HOUR; i++) {
-  timeLabels.push(`${i > 12 ? i - 12 : i}:00 ${i >= 12 ? 'PM' : 'AM'}`)
+function formatDisplayDate(dateStr: string) {
+  if (!dateStr) return ''
+  const [y, m, d] = dateStr.split('-').map(Number)
+  const dt = new Date(y, m - 1, d)
+  return dt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
 }
 
 type WalkInSlot = { time: string, barberId: string, barberName: string }
@@ -81,7 +84,7 @@ export default function AdminDashboard() {
   const [adminServices, setAdminServices] = useState<any[]>([])
   const [refreshTrigger, setRefreshTrigger] = useState(0)
 
-  const [calendarView, setCalendarView] = useState<'month' | 'week' | 'day'>('day')
+  const [viewMode, setViewMode] = useState<'month' | 'week' | 'day'>('day')
   const [viewMonthDate, setViewMonthDate] = useState(() => {
     const d = new Date()
     return new Date(d.getFullYear(), d.getMonth(), 1)
@@ -168,41 +171,67 @@ export default function AdminDashboard() {
   // --- DATA FETCHERS ---
   useEffect(() => {
     async function fetchLineup() {
-      if (!selectedBarberId || activeModule !== 'calendar' || calendarView !== 'day') return
+      if (!selectedBarberId || activeModule !== 'calendar' || viewMode !== 'day') return
       setLoadingAppts(true)
-      const { data, error } = await supabase.from('appointments')
-        .select(`id, start_time, end_time, status, notes, clients ( id, name, phone, notes )`)
-        .eq('appointment_date', selectedDate)
-        .eq('barber_id', selectedBarberId)
-        .neq('status', 'cancelled')
-        .order('start_time', { ascending: true })
-      if (!error && data) setAppointments(data)
+      const [apptRes, overrideRes] = await Promise.all([
+        supabase.from('appointments')
+          .select(`id, start_time, end_time, status, notes, clients ( id, name, phone, notes )`)
+          .eq('appointment_date', selectedDate)
+          .eq('barber_id', selectedBarberId)
+          .neq('status', 'cancelled')
+          .order('start_time', { ascending: true }),
+        supabase.from('schedule_overrides')
+          .select('*')
+          .eq('barber_id', selectedBarberId)
+          .eq('override_date', selectedDate)
+          .maybeSingle()
+      ])
+      if (!apptRes.error && apptRes.data) setAppointments(apptRes.data)
+      if (overrideRes.data) {
+        setIsDayOff(overrideRes.data.is_off)
+        if (overrideRes.data.start_time) setOverrideStart(overrideRes.data.start_time.slice(0, 5))
+        if (overrideRes.data.end_time) setOverrideEnd(overrideRes.data.end_time.slice(0, 5))
+      } else {
+        setIsDayOff(false)
+        setOverrideStart('09:00')
+        setOverrideEnd('17:00')
+      }
       setLoadingAppts(false)
     }
     fetchLineup()
-  }, [selectedBarberId, selectedDate, calendarView, activeModule, refreshTrigger])
+  }, [selectedBarberId, selectedDate, viewMode, activeModule, refreshTrigger])
 
   useEffect(() => {
     async function fetchMonthData() {
-      if (!selectedBarberId || activeModule !== 'calendar' || calendarView !== 'month') return
+      if (!selectedBarberId || activeModule !== 'calendar' || viewMode !== 'month') return
       const year = viewMonthDate.getFullYear()
       const month = viewMonthDate.getMonth()
       const startOfMonth = `${year}-${String(month + 1).padStart(2, '0')}-01`
       const endOfMonth = new Date(year, month + 1, 0).toISOString().split('T')[0]
 
       const [apptRes, overrideRes] = await Promise.all([
-        supabase.from('appointments').select('id, appointment_date, status').eq('barber_id', selectedBarberId).gte('appointment_date', startOfMonth).lte('appointment_date', endOfMonth).neq('status', 'cancelled'),
-        supabase.from('schedule_overrides').select('override_date, is_off').eq('barber_id', selectedBarberId).gte('override_date', startOfMonth).lte('override_date', endOfMonth)
+        supabase.from('appointments')
+          .select('id, appointment_date, start_time, end_time, status, clients ( name )')
+          .eq('barber_id', selectedBarberId)
+          .gte('appointment_date', startOfMonth)
+          .lte('appointment_date', endOfMonth)
+          .neq('status', 'cancelled')
+          .order('start_time', { ascending: true }),
+        supabase.from('schedule_overrides')
+          .select('override_date, is_off')
+          .eq('barber_id', selectedBarberId)
+          .gte('override_date', startOfMonth)
+          .lte('override_date', endOfMonth)
       ])
       setMonthAppointments(apptRes.data || [])
       setMonthOverrides(overrideRes.data || [])
     }
     fetchMonthData()
-  }, [selectedBarberId, viewMonthDate, activeModule, calendarView, refreshTrigger])
+  }, [selectedBarberId, viewMonthDate, activeModule, viewMode, refreshTrigger])
 
   useEffect(() => {
     async function fetchWeekData() {
-      if (!selectedBarberId || activeModule !== 'calendar' || calendarView !== 'week') return
+      if (!selectedBarberId || activeModule !== 'calendar' || viewMode !== 'week') return
       const startOfWeek = `${viewWeekStartDate.getFullYear()}-${String(viewWeekStartDate.getMonth() + 1).padStart(2, '0')}-${String(viewWeekStartDate.getDate()).padStart(2, '0')}`
       const endOfWeekDate = new Date(viewWeekStartDate)
       endOfWeekDate.setDate(endOfWeekDate.getDate() + 6)
@@ -216,7 +245,7 @@ export default function AdminDashboard() {
       setWeekOverrides(overrideRes.data || [])
     }
     fetchWeekData()
-  }, [selectedBarberId, viewWeekStartDate, activeModule, calendarView, refreshTrigger])
+  }, [selectedBarberId, viewWeekStartDate, activeModule, viewMode, refreshTrigger])
 
   const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
   const dayNamesShort = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -226,15 +255,68 @@ export default function AdminDashboard() {
     const d = new Date(parts[0], parts[1] - 1, parts[2])
     const diff = d.getDate() - d.getDay()
     setViewWeekStartDate(new Date(d.setDate(diff)))
+    setViewMonthDate(new Date(parts[0], parts[1] - 1, 1))
   }, [selectedDate])
 
   const handlePrevMonth = () => setViewMonthDate(prev => new Date(prev.getFullYear(), prev.getMonth() - 1, 1))
   const handleNextMonth = () => setViewMonthDate(prev => new Date(prev.getFullYear(), prev.getMonth() + 1, 1))
-  const handlePrevWeek = () => setViewWeekStartDate(prev => { const d = new Date(prev); d.setDate(d.getDate() - 7); return d })
-  const handleNextWeek = () => setViewWeekStartDate(prev => { const d = new Date(prev); d.setDate(d.getDate() + 7); return d })
+  const handlePrevWeek = () => {
+    setViewWeekStartDate(prev => { const d = new Date(prev); d.setDate(d.getDate() - 7); return d })
+    const parts = selectedDate.split('-').map(Number)
+    const cur = new Date(parts[0], parts[1] - 1, parts[2])
+    cur.setDate(cur.getDate() - 7)
+    setSelectedDate(`${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}-${String(cur.getDate()).padStart(2, '0')}`)
+  }
+  const handleNextWeek = () => {
+    setViewWeekStartDate(prev => { const d = new Date(prev); d.setDate(d.getDate() + 7); return d })
+    const parts = selectedDate.split('-').map(Number)
+    const cur = new Date(parts[0], parts[1] - 1, parts[2])
+    cur.setDate(cur.getDate() + 7)
+    setSelectedDate(`${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}-${String(cur.getDate()).padStart(2, '0')}`)
+  }
+  const handlePrevDay = () => {
+    const parts = selectedDate.split('-').map(Number)
+    const cur = new Date(parts[0], parts[1] - 1, parts[2])
+    cur.setDate(cur.getDate() - 1)
+    setSelectedDate(`${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}-${String(cur.getDate()).padStart(2, '0')}`)
+  }
+  const handleNextDay = () => {
+    const parts = selectedDate.split('-').map(Number)
+    const cur = new Date(parts[0], parts[1] - 1, parts[2])
+    cur.setDate(cur.getDate() + 1)
+    setSelectedDate(`${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}-${String(cur.getDate()).padStart(2, '0')}`)
+  }
+
+  const handlePrev = () => {
+    if (viewMode === 'month') handlePrevMonth()
+    else if (viewMode === 'week') handlePrevWeek()
+    else handlePrevDay()
+  }
+
+  const handleNext = () => {
+    if (viewMode === 'month') handleNextMonth()
+    else if (viewMode === 'week') handleNextWeek()
+    else handleNextDay()
+  }
+
+  const handleToday = () => {
+    const d = new Date()
+    d.setMinutes(d.getMinutes() - d.getTimezoneOffset())
+    const today = d.toISOString().split('T')[0]
+    setSelectedDate(today)
+    setBookDate(today)
+    const cur = new Date()
+    setViewMonthDate(new Date(cur.getFullYear(), cur.getMonth(), 1))
+    const parts = today.split('-').map(Number)
+    const dt = new Date(parts[0], parts[1] - 1, parts[2])
+    const diff = dt.getDate() - dt.getDay()
+    setViewWeekStartDate(new Date(dt.setDate(diff)))
+  }
 
   const handleDayClick = (dateStr: string) => {
-    setSelectedDate(dateStr); setBookDate(dateStr); setCalendarView('day')
+    setSelectedDate(dateStr)
+    setBookDate(dateStr)
+    setViewMode('day')
   }
 
   const fetchMyServices = async () => {
@@ -584,26 +666,138 @@ export default function AdminDashboard() {
   weekEndDate.setDate(weekEndDate.getDate() + 6)
   const isSameMonth = viewWeekStartDate.getMonth() === weekEndDate.getMonth()
 
-  // REUSABLE TIME-RAIL RENDER ENGINE
-  const renderTimeGrid = (gridDate: string, gridAppts: any[], isOff: boolean | undefined) => {
-    return (
-      <div className="relative flex-1 border-r border-[var(--color-brand-700)] min-w-[120px]" style={{ height: `${(CALENDAR_END_HOUR - CALENDAR_START_HOUR) * 60 * PIXELS_PER_MINUTE}px` }}>
+  // REUSABLE VAGARO Y-AXIS (Hours with small :15, :30, :45 markers)
+  const renderYAxis = () => (
+    <div
+      className="w-14 sm:w-16 flex-shrink-0 bg-[var(--color-brand-900)] border-r border-[var(--color-brand-700)] sticky left-0 z-30 select-none"
+      style={{ height: `${TOTAL_RAIL_HEIGHT}px` }}
+    >
+      <div className="relative w-full h-full">
+        {Array.from({ length: TOTAL_HOURS + 1 }).map((_, hourIdx) => {
+          const hour = CALENDAR_START_HOUR + hourIdx
+          const hDisplay = hour > 12 ? `${hour - 12} PM` : hour === 12 ? '12 PM' : `${hour} AM`
+          const isNotLast = hourIdx < TOTAL_HOURS
 
-        {/* Grid Lines */}
-        {Array.from({ length: CALENDAR_END_HOUR - CALENDAR_START_HOUR + 1 }).map((_, i) => (
-          <div key={`grid-${i}`} className="absolute left-0 w-full h-0 m-0 p-0 box-border border-t border-[var(--color-brand-700)]/40 pointer-events-none" style={{ top: `${i * PIXELS_PER_HOUR}px` }} />
-        ))}
-
-        {/* Empty Tap-to-Book Slots */}
-        {Array.from({ length: (CALENDAR_END_HOUR - CALENDAR_START_HOUR) * 4 }).map((_, i) => {
-          const totalMins = CALENDAR_START_HOUR * 60 + (i * 15)
-          const timeStr = `${Math.floor(totalMins / 60).toString().padStart(2,'0')}:${(totalMins % 60).toString().padStart(2,'0')}`
           return (
-            <button key={`slot-${i}`} onClick={() => { setBookDate(gridDate); setBookTime(timeStr); setShowBookModal(true); }} className={`absolute w-full m-0 box-border border-b border-[var(--color-brand-700)]/20 hover:bg-[var(--color-brand-accent)]/20 transition-colors z-10 ${isOff ? 'pointer-events-none opacity-0' : 'cursor-pointer'}`} style={{ top: `${(i * 15) * PIXELS_PER_MINUTE}px`, height: `${15 * PIXELS_PER_MINUTE}px` }} />
+            <div key={`y-hour-${hourIdx}`}>
+              {/* Top of hour marker */}
+              <div
+                className="absolute right-0 pr-1.5 text-right -translate-y-1/2 flex items-center justify-end gap-1 pointer-events-none"
+                style={{ top: `${hourIdx * PIXELS_PER_HOUR}px` }}
+              >
+                <span className="text-[10px] sm:text-[11px] font-bold text-[var(--color-brand-light)] leading-none whitespace-nowrap">
+                  {hDisplay}
+                </span>
+                <span className="w-1.5 h-[1px] bg-[var(--color-brand-700)]/80" />
+              </div>
+
+              {/* Sub-hour markers (:15, :30, :45) */}
+              {isNotLast && (
+                <>
+                  <div
+                    className="absolute right-0 pr-1.5 text-right -translate-y-1/2 flex items-center justify-end gap-1 pointer-events-none"
+                    style={{ top: `${hourIdx * PIXELS_PER_HOUR + 20}px` }}
+                  >
+                    <span className="text-[9px] font-mono text-[var(--color-brand-muted)] opacity-50 leading-none">
+                      :15
+                    </span>
+                    <span className="w-1 h-[1px] bg-[var(--color-brand-700)]/30" />
+                  </div>
+                  <div
+                    className="absolute right-0 pr-1.5 text-right -translate-y-1/2 flex items-center justify-end gap-1 pointer-events-none"
+                    style={{ top: `${hourIdx * PIXELS_PER_HOUR + 40}px` }}
+                  >
+                    <span className="text-[9px] font-mono text-[var(--color-brand-muted)] opacity-70 leading-none">
+                      :30
+                    </span>
+                    <span className="w-1.5 h-[1px] bg-[var(--color-brand-700)]/50" />
+                  </div>
+                  <div
+                    className="absolute right-0 pr-1.5 text-right -translate-y-1/2 flex items-center justify-end gap-1 pointer-events-none"
+                    style={{ top: `${hourIdx * PIXELS_PER_HOUR + 60}px` }}
+                  >
+                    <span className="text-[9px] font-mono text-[var(--color-brand-muted)] opacity-50 leading-none">
+                      :45
+                    </span>
+                    <span className="w-1 h-[1px] bg-[var(--color-brand-700)]/30" />
+                  </div>
+                </>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+
+  // REUSABLE TIME-RAIL RENDER ENGINE (ZERO BORDER DRIFT - GRADIENT-BASED)
+  const renderTimeGrid = (gridDate: string, gridAppts: any[], isOff: boolean | undefined, isWeekView = false) => {
+    const now = new Date()
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+    const isToday = gridDate === todayStr
+    const currentMins = now.getHours() * 60 + now.getMinutes()
+    const isWithinHours = currentMins >= CALENDAR_START_HOUR * 60 && currentMins <= CALENDAR_END_HOUR * 60
+    const currentTop = ((currentMins - CALENDAR_START_HOUR * 60) / 60) * PIXELS_PER_HOUR
+
+    return (
+      <div
+        className={`relative flex-1 ${isWeekView ? 'border-r border-[var(--color-brand-700)]/60 min-w-0' : 'w-full'}`}
+        style={{
+          height: `${TOTAL_RAIL_HEIGHT}px`,
+          backgroundImage: `
+            linear-gradient(to bottom, rgba(255, 255, 255, 0.12) 1px, transparent 1px),
+            linear-gradient(to bottom, rgba(255, 255, 255, 0.04) 1px, transparent 1px)
+          `,
+          backgroundSize: `100% ${PIXELS_PER_HOUR}px, 100% ${SLOT_HEIGHT}px`,
+          backgroundRepeat: 'repeat-y',
+        }}
+      >
+        {/* Off-duty overlay */}
+        {isOff && (
+          <div className="absolute inset-0 bg-[repeating-linear-gradient(45deg,transparent,transparent_10px,var(--color-brand-900)_10px,var(--color-brand-900)_20px)] opacity-60 z-10 pointer-events-none flex items-center justify-center">
+            <div className="bg-[var(--color-brand-900)]/90 border border-red-500/40 text-red-400 text-xs font-bold px-3 py-1.5 rounded-full shadow-lg">
+              OFF DUTY
+            </div>
+          </div>
+        )}
+
+        {/* Empty Tap-to-Book Slots (borderless - zero physical height stacking) */}
+        {Array.from({ length: TOTAL_HOURS * 4 }).map((_, i) => {
+          const totalMins = CALENDAR_START_HOUR * 60 + (i * 15)
+          const timeStr = `${Math.floor(totalMins / 60).toString().padStart(2, '0')}:${(totalMins % 60).toString().padStart(2, '0')}`
+          return (
+            <button
+              key={`slot-${i}`}
+              onClick={() => {
+                setBookDate(gridDate)
+                setBookTime(timeStr)
+                if (!bookService && adminServices.length > 0) setBookService(adminServices[0])
+                setShowBookModal(true)
+              }}
+              title={`Book ${formatTime(timeStr)}`}
+              className={`absolute left-0 w-full m-0 p-0 border-0 outline-none transition-colors z-10 ${
+                isOff
+                  ? 'pointer-events-none opacity-0'
+                  : 'cursor-pointer hover:bg-[var(--color-brand-accent)]/15 active:bg-[var(--color-brand-accent)]/25'
+              }`}
+              style={{
+                top: `${i * SLOT_HEIGHT}px`,
+                height: `${SLOT_HEIGHT}px`,
+              }}
+            />
           )
         })}
 
-        {isOff && <div className="absolute inset-0 bg-[repeating-linear-gradient(45deg,transparent,transparent_10px,var(--color-brand-900)_10px,var(--color-brand-900)_20px)] opacity-50 z-10 pointer-events-none" />}
+        {/* Live Current Time Red Indicator Line */}
+        {isToday && isWithinHours && !isOff && (
+          <div
+            className="absolute left-0 right-0 z-20 pointer-events-none flex items-center"
+            style={{ top: `${currentTop}px` }}
+          >
+            <div className="w-2.5 h-2.5 rounded-full bg-red-500 -ml-1 shadow-[0_0_8px_rgba(239,68,68,0.9)] ring-2 ring-[var(--color-brand-900)] flex-shrink-0" />
+            <div className="flex-1 h-[2px] bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.7)]" />
+          </div>
+        )}
 
         {/* Dynamic Appointment Blocks */}
         {!isOff && gridAppts.map(appt => {
@@ -611,25 +805,73 @@ export default function AdminDashboard() {
           const durationMins = Math.max(15, toMinutes(appt.end_time) - toMinutes(appt.start_time))
           const height = durationMins * PIXELS_PER_MINUTE
 
+          const isBlocked = appt.status === 'blocked'
+          const isCompleted = appt.status === 'completed'
+
+          const colorClasses = isBlocked
+            ? 'bg-orange-950/90 border-orange-500/80 text-orange-200'
+            : isCompleted
+            ? 'bg-emerald-950/90 border-emerald-500/80 text-emerald-200'
+            : 'bg-[var(--color-brand-800)] border-[var(--color-brand-accent)] text-white shadow-md'
+
+          if (isWeekView) {
+            return (
+              <button
+                key={appt.id}
+                onClick={(e) => { e.stopPropagation(); handleOpenAppt(appt); }}
+                className={`absolute left-0.5 right-0.5 m-0 box-border rounded p-1 overflow-hidden border shadow-sm flex flex-col text-left z-20 cursor-pointer hover:brightness-125 transition-all ${colorClasses}`}
+                style={{ top: `${top}px`, height: `${height}px` }}
+              >
+                <div className="text-[10px] font-bold leading-tight truncate">
+                  {formatTime(appt.start_time).replace(':00', '')} {isBlocked ? 'BLOCKED' : appt.clients?.name || 'Walk-In'}
+                </div>
+                {height >= 35 && (
+                  <div className="text-[9px] opacity-75 truncate leading-none mt-0.5">
+                    {isBlocked ? 'Blocked' : formatTime(appt.end_time).replace(':00', '')}
+                  </div>
+                )}
+              </button>
+            )
+          }
+
           return (
             <button
               key={appt.id}
               onClick={() => handleOpenAppt(appt)}
-              className={`absolute left-1 right-1 m-0 box-border rounded-md p-2 overflow-hidden border shadow-md flex flex-col text-left z-20 cursor-pointer hover:brightness-110 transition-all ${
-                appt.status === 'blocked' ? 'bg-orange-900/80 border-orange-500 text-orange-200' :
-                appt.status === 'completed' ? 'bg-green-900/80 border-green-500 text-green-200' :
-                'bg-[var(--color-brand-800)] border-[var(--color-brand-accent)] text-[var(--color-brand-light)]'
-              }`}
+              className={`absolute left-1.5 right-1.5 m-0 box-border rounded-lg p-2 overflow-hidden border shadow-md flex flex-col text-left z-20 cursor-pointer hover:brightness-110 transition-all ${colorClasses}`}
               style={{ top: `${top}px`, height: `${height}px` }}
             >
-              <div className={`text-xs font-bold ${appt.status === 'blocked' ? 'text-orange-400' : appt.status === 'completed' ? 'text-green-400' : 'text-[var(--color-brand-accent)]'}`}>
-                {appt.status === 'blocked' && <Lock className="w-3 h-3 inline mr-1 -mt-0.5" />}
-                {formatTime(appt.start_time)}
-              </div>
-              <div className="text-xs truncate font-medium flex items-center gap-1">
-                <span className="truncate">{appt.status === 'booked' || appt.status === 'completed' ? appt.clients?.name : appt.status.toUpperCase()}</span>
-                {appt.notes && <FileText className="w-3 h-3 flex-shrink-0 opacity-70" />}
-              </div>
+              {height <= 25 ? (
+                <div className="flex items-center justify-between text-xs font-bold leading-none">
+                  <span className="truncate flex items-center gap-1">
+                    {isBlocked && <Lock className="w-3 h-3 flex-shrink-0 text-orange-400" />}
+                    {isBlocked ? 'BLOCKED TIME' : appt.clients?.name || 'Walk-In'}
+                  </span>
+                  <span className="text-[10px] opacity-80 flex-shrink-0 ml-1">
+                    {formatTime(appt.start_time)}
+                  </span>
+                </div>
+              ) : (
+                <>
+                  <div className={`text-xs font-bold flex items-center justify-between ${
+                    isBlocked ? 'text-orange-400' : isCompleted ? 'text-emerald-400' : 'text-[var(--color-brand-accent)]'
+                  }`}>
+                    <span className="flex items-center gap-1">
+                      {isBlocked && <Lock className="w-3 h-3 flex-shrink-0" />}
+                      {formatTime(appt.start_time)} - {formatTime(appt.end_time)}
+                    </span>
+                    {appt.notes && <FileText className="w-3 h-3 flex-shrink-0 opacity-80" />}
+                  </div>
+                  <div className="text-xs truncate font-bold text-white mt-0.5">
+                    {isBlocked ? 'BLOCKED TIME' : appt.clients?.name || 'Walk-In'}
+                  </div>
+                  {height >= 55 && appt.clients?.phone && appt.clients?.phone !== '0000000000' && (
+                    <div className="text-[10px] text-[var(--color-brand-muted)] font-mono mt-auto truncate">
+                      {appt.clients.phone}
+                    </div>
+                  )}
+                </>
+              )}
             </button>
           )
         })}
@@ -637,393 +879,9 @@ export default function AdminDashboard() {
     )
   }
 
-  // PROTECTED DASHBOARD RENDER
-  return (
-    <div className="min-h-screen bg-[var(--color-brand-900)] text-[var(--color-brand-light)] p-4 md:p-8 font-sans relative">
-      <div className="max-w-4xl mx-auto">
-        <header className="flex items-center justify-between mb-8 border-b border-[var(--color-brand-700)] pb-6">
-          <div className="flex items-center gap-3">
-            <Shield className="text-[var(--color-brand-accent)] w-8 h-8" />
-            <div>
-              <h1 className="text-2xl font-bold">Barber Portal</h1>
-              <p className="text-sm text-[var(--color-brand-muted)]">{session.user.email}</p>
-            </div>
-          </div>
-          <button onClick={handleLogout} className="flex items-center gap-2 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] px-4 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer">
-            <LogOut className="w-4 h-4" /> Sign Out
-          </button>
-        </header>
-
-        {/* --- MAIN MODULE NAVIGATION --- */}
-        {activeModule === 'home' && (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-            <button onClick={() => setActiveModule('calendar')} className="bg-[var(--color-brand-800)] p-6 rounded-xl border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] transition-colors text-left group cursor-pointer">
-              <Calendar className="w-6 h-6 text-[var(--color-brand-accent)] mb-3" />
-              <h3 className="text-lg font-bold mb-1 group-hover:text-[var(--color-brand-accent)]">Live Calendar</h3>
-              <p className="text-xs text-[var(--color-brand-muted)]">Manage daily lineup</p>
-            </button>
-            <button onClick={() => setActiveModule('walkin')} className="bg-[var(--color-brand-800)] p-6 rounded-xl border border-[var(--color-brand-700)] hover:border-orange-500 transition-colors text-left group cursor-pointer">
-              <Zap className="w-6 h-6 text-orange-500 mb-3" />
-              <h3 className="text-lg font-bold mb-1 group-hover:text-orange-500">Express Walk-In</h3>
-              <p className="text-xs text-[var(--color-brand-muted)]">1-Tap shop lockdown</p>
-            </button>
-            <button onClick={() => setActiveModule('clients')} className="bg-[var(--color-brand-800)] p-6 rounded-xl border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] transition-colors text-left group cursor-pointer">
-              <Users className="w-6 h-6 text-[var(--color-brand-accent)] mb-3" />
-              <h3 className="text-lg font-bold mb-1 group-hover:text-[var(--color-brand-accent)]">Clients</h3>
-              <p className="text-xs text-[var(--color-brand-muted)]">Cut notes & history</p>
-            </button>
-            <button onClick={() => setActiveModule('services')} className="bg-[var(--color-brand-800)] p-6 rounded-xl border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] transition-colors text-left group cursor-pointer">
-              <Settings className="w-6 h-6 text-[var(--color-brand-accent)] mb-3" />
-              <h3 className="text-lg font-bold mb-1 group-hover:text-[var(--color-brand-accent)]">My Services</h3>
-              <p className="text-xs text-[var(--color-brand-muted)]">Prices & durations</p>
-            </button>
-          </div>
-        )}
-
-        {/* --- 1. LIVE CALENDAR MODULE --- */}
-        {activeModule === 'calendar' && (
-          <div className="bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-2xl p-4 md:p-6 shadow-xl animate-in fade-in slide-in-from-bottom-4 duration-300">
-
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
-              <div className="flex items-center gap-3">
-                <button onClick={() => setActiveModule('home')} className="p-2 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-full hover:border-[var(--color-brand-accent)] hover:text-[var(--color-brand-accent)] transition-colors cursor-pointer flex-shrink-0">
-                  <ArrowLeft className="w-5 h-5" />
-                </button>
-                <select value={selectedBarberId} onChange={(e) => setSelectedBarberId(e.target.value)} className="bg-[var(--color-brand-900)] text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-lg p-2 outline-none focus:border-[var(--color-brand-accent)] transition-colors cursor-pointer font-bold appearance-none">
-                  {barbers.map(barber => <option key={barber.id} value={barber.id}>{barber.name}'s Schedule</option>)}
-                </select>
-              </div>
-              <div className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] p-1 rounded-lg flex self-start sm:self-auto">
-                <button onClick={() => setCalendarView('month')} className={`px-4 py-2 rounded-md text-sm font-bold transition-all cursor-pointer ${calendarView === 'month' ? 'bg-[var(--color-brand-800)] text-[var(--color-brand-light)] shadow' : 'text-[var(--color-brand-muted)] hover:text-white'}`}>Month</button>
-                <button onClick={() => setCalendarView('week')} className={`px-4 py-2 rounded-md text-sm font-bold transition-all cursor-pointer ${calendarView === 'week' ? 'bg-[var(--color-brand-800)] text-[var(--color-brand-light)] shadow' : 'text-[var(--color-brand-muted)] hover:text-white'}`}>Week</button>
-                <button onClick={() => setCalendarView('day')} className={`px-4 py-2 rounded-md text-sm font-bold transition-all cursor-pointer ${calendarView === 'day' ? 'bg-[var(--color-brand-800)] text-[var(--color-brand-light)] shadow' : 'text-[var(--color-brand-muted)] hover:text-white'}`}>Day</button>
-              </div>
-            </div>
-
-            <div className="flex flex-col sm:flex-row gap-3 mb-6 bg-[var(--color-brand-900)] p-4 rounded-xl border border-[var(--color-brand-700)]">
-              <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} className="flex-grow sm:flex-grow-0 bg-[var(--color-brand-800)] text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-lg p-3 outline-none focus:border-[var(--color-brand-accent)] transition-colors [color-scheme:dark] font-bold cursor-pointer" />
-              <div className="flex gap-2 w-full sm:w-auto ml-auto">
-                <button onClick={() => setShowManageDayModal(true)} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] text-[var(--color-brand-light)] px-4 py-3 rounded-lg font-bold hover:border-[var(--color-brand-accent)] cursor-pointer transition-colors">
-                  <SlidersHorizontal className="w-5 h-5" /> Manage
-                </button>
-                <button onClick={() => { setBookDate(selectedDate); setBookTime(''); setShowBookModal(true); }} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-[var(--color-brand-accent)] text-white px-4 py-3 rounded-lg font-bold hover:brightness-110 cursor-pointer">
-                  <Plus className="w-5 h-5" /> Book
-                </button>
-              </div>
-            </div>
-
-            {/* MONTH VIEW */}
-            {calendarView === 'month' && (
-              <div className="animate-in fade-in duration-300">
-                <div className="flex items-center justify-between mb-4 px-2">
-                  <h3 className="text-xl font-bold text-[var(--color-brand-light)]">
-                    {monthNames[viewMonthDate.getMonth()]} {viewMonthDate.getFullYear()}
-                  </h3>
-                  <div className="flex gap-2">
-                    <button onClick={handlePrevMonth} className="p-2 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded hover:border-[var(--color-brand-accent)] transition-colors cursor-pointer">
-                      <ChevronLeft className="w-5 h-5" />
-                    </button>
-                    <button onClick={handleNextMonth} className="p-2 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded hover:border-[var(--color-brand-accent)] transition-colors cursor-pointer">
-                      <ChevronRight className="w-5 h-5" />
-                    </button>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-7 gap-1 sm:gap-2">
-                  {dayNamesShort.map(day => (
-                    <div key={day} className="text-center text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider py-2">
-                      {day}
-                    </div>
-                  ))}
-
-                  {monthMatrix.map((date, index) => {
-                    if (!date) return <div key={`empty-${index}`} className="h-16 sm:h-24 bg-[var(--color-brand-900)]/30 border border-[var(--color-brand-700)]/50 rounded-lg"></div>
-
-                    const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
-                    const isToday = dateStr === new Date().toISOString().split('T')[0]
-                    const dayAppts = monthAppointments.filter(a => a.appointment_date === dateStr)
-                    const dayOverride = monthOverrides.find(o => o.override_date === dateStr)
-                    const isOff = dayOverride?.is_off
-
-                    return (
-                      <button
-                        key={index}
-                        onClick={() => handleDayClick(dateStr)}
-                        className={`relative h-16 sm:h-24 p-2 flex flex-col items-start border rounded-lg cursor-pointer transition-colors ${
-                          isToday ? 'border-[var(--color-brand-accent)] bg-[var(--color-brand-accent)]/10' : 'border-[var(--color-brand-700)] bg-[var(--color-brand-900)] hover:border-[var(--color-brand-accent)]'
-                        } ${isOff ? 'opacity-50 overflow-hidden' : ''}`}
-                      >
-                        <span className={`text-sm font-bold ${isToday ? 'text-[var(--color-brand-accent)]' : 'text-[var(--color-brand-light)]'}`}>
-                          {date.getDate()}
-                        </span>
-
-                        {isOff && <div className="absolute inset-0 flex items-center justify-center"><div className="w-full h-px bg-red-500/50 transform -rotate-45"></div></div>}
-
-                        {!isOff && dayAppts.length > 0 && (
-                          <div className="mt-auto flex flex-wrap gap-1">
-                            {dayAppts.slice(0, 3).map((_, i) => <div key={i} className="w-2 h-2 rounded-full bg-[var(--color-brand-accent)] shadow-[0_0_5px_rgba(168,85,247,0.8)]"></div>)}
-                            {dayAppts.length > 3 && <span className="text-[10px] text-[var(--color-brand-muted)] font-bold leading-none">+{dayAppts.length - 3}</span>}
-                          </div>
-                        )}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* WEEK VIEW (Time-Rail Matrix) */}
-            {calendarView === 'week' && (
-              <div className="animate-in fade-in duration-300 flex flex-col h-[600px] border border-[var(--color-brand-700)] rounded-xl overflow-hidden bg-[var(--color-brand-900)] mt-6">
-
-                {/* Week Header (Restored to fix isSameMonth warning) */}
-                <div className="flex items-center justify-between p-4 border-b border-[var(--color-brand-700)] bg-[var(--color-brand-800)]">
-                  <h3 className="text-sm sm:text-xl font-bold text-[var(--color-brand-light)]">
-                    {monthNames[viewWeekStartDate.getMonth()]} {viewWeekStartDate.getDate()} - {isSameMonth ? '' : monthNames[weekEndDate.getMonth()]} {weekEndDate.getDate()}, {viewWeekStartDate.getFullYear()}
-                  </h3>
-                </div>
-
-                <div className="flex bg-[var(--color-brand-800)] border-b border-[var(--color-brand-700)]">
-                  <div className="w-16 flex-shrink-0 border-r border-[var(--color-brand-700)] flex flex-col items-center justify-center p-1">
-                    <button onClick={handlePrevWeek} className="p-1 hover:text-[var(--color-brand-accent)] cursor-pointer"><ChevronLeft className="w-4 h-4" /></button>
-                    <button onClick={handleNextWeek} className="p-1 hover:text-[var(--color-brand-accent)] cursor-pointer"><ChevronRight className="w-4 h-4" /></button>
-                  </div>
-                  <div className="flex-1 flex overflow-x-hidden">
-                    {Array.from({ length: 7 }).map((_, i) => {
-                      const d = new Date(viewWeekStartDate); d.setDate(d.getDate() + i)
-                      const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-                      const isToday = dateStr === new Date().toISOString().split('T')[0]
-                      return (
-                        <button key={dateStr} onClick={() => handleDayClick(dateStr)} className={`flex-1 min-w-[120px] text-center p-2 border-r border-[var(--color-brand-700)] cursor-pointer transition-colors ${isToday ? 'bg-[var(--color-brand-accent)]/20 border-b-2 border-b-[var(--color-brand-accent)]' : 'hover:bg-[var(--color-brand-accent)]/10'}`}>
-                          <div className={`text-[10px] uppercase font-bold tracking-wider ${isToday ? 'text-[var(--color-brand-accent)]' : 'text-[var(--color-brand-muted)]'}`}>{dayNamesShort[d.getDay()]}</div>
-                          <div className={`text-lg font-bold ${isToday ? 'text-[var(--color-brand-accent)]' : ''}`}>{d.getDate()}</div>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-                <div className="flex-1 overflow-y-auto overflow-x-auto relative">
-                  <div className="flex min-w-[max-content] md:min-w-full">
-                    <div className="w-16 flex-shrink-0 bg-[var(--color-brand-800)] border-r border-[var(--color-brand-700)] sticky left-0 z-30 pt-4 pb-4">
-                      <div className="relative" style={{ height: `${(CALENDAR_END_HOUR - CALENDAR_START_HOUR) * PIXELS_PER_HOUR}px` }}>
-                        {timeLabels.map((label, i) => <div key={i} className="absolute right-0 pr-2 text-right text-[10px] leading-none text-[var(--color-brand-muted)] font-bold -translate-y-1/2 whitespace-nowrap" style={{ top: `${i * PIXELS_PER_HOUR}px` }}>{label}</div>)}
-                      </div>
-                    </div>
-                    {Array.from({ length: 7 }).map((_, i) => {
-                      const d = new Date(viewWeekStartDate); d.setDate(d.getDate() + i)
-                      const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-                      const dayAppts = weekAppointments.filter(a => a.appointment_date === dateStr)
-                      const isOff = weekOverrides.find(o => o.override_date === dateStr)?.is_off
-                      return <div key={dateStr} className="flex-1 pt-4 pb-4">{renderTimeGrid(dateStr, dayAppts, isOff)}</div>
-                    })}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* DAY VIEW (Time-Rail Matrix) */}
-            {calendarView === 'day' && (
-              <div className="animate-in fade-in slide-in-from-right-4 duration-300 flex flex-col h-[600px] border border-[var(--color-brand-700)] rounded-xl overflow-hidden bg-[var(--color-brand-900)] mt-6">
-                <div className="flex bg-[var(--color-brand-800)] border-b border-[var(--color-brand-700)] items-center p-4">
-                   <div className="text-xl font-bold">{new Date(selectedDate).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' })}</div>
-                </div>
-                <div className="flex-1 overflow-y-auto relative">
-                  <div className="flex">
-                    <div className="w-16 flex-shrink-0 bg-[var(--color-brand-800)] border-r border-[var(--color-brand-700)] sticky left-0 z-30 pt-4 pb-4">
-                      <div className="relative" style={{ height: `${(CALENDAR_END_HOUR - CALENDAR_START_HOUR) * PIXELS_PER_HOUR}px` }}>
-                        {timeLabels.map((label, i) => <div key={i} className="absolute right-0 pr-2 text-right text-[10px] leading-none text-[var(--color-brand-muted)] font-bold -translate-y-1/2 whitespace-nowrap" style={{ top: `${i * PIXELS_PER_HOUR}px` }}>{label}</div>)}
-                      </div>
-                    </div>
-                    <div className="flex-1 pt-4 pb-4">
-                      {loadingAppts ? <div className="p-8 text-[var(--color-brand-muted)] animate-pulse">Fetching...</div> : renderTimeGrid(selectedDate, appointments, isDayOff)}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* --- 2. EXPRESS WALK-IN UI --- */}
-        {activeModule === 'walkin' && (
-          <div className="bg-[var(--color-brand-800)] border border-orange-500/30 rounded-2xl p-6 shadow-[0_0_40px_rgba(249,115,22,0.1)] animate-in fade-in max-w-2xl mx-auto">
-            <div className="flex items-center gap-3 mb-8">
-              <button onClick={() => setActiveModule('home')} className="p-2 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-full hover:border-orange-500 cursor-pointer">
-                <ArrowLeft className="w-5 h-5" />
-              </button>
-              <div>
-                <h2 className="text-xl font-bold flex items-center gap-2 text-orange-500"><Zap className="w-5 h-5" /> Express Walk-In</h2>
-                <p className="text-sm text-[var(--color-brand-muted)]">Select a service, tap an open time, and instantly lock the chair.</p>
-              </div>
-            </div>
-
-            <div className="flex flex-col sm:flex-row gap-4 mb-8">
-              <select value={walkInBarberId} onChange={(e) => setWalkInBarberId(e.target.value)} className="w-full sm:w-1/3 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-4 outline-none appearance-none cursor-pointer font-bold">
-                <option value="any">All Available Barbers</option>
-                {barbers.map(barber => <option key={barber.id} value={barber.id}>{barber.name}</option>)}
-              </select>
-
-              <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} className="w-full sm:w-1/3 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-4 outline-none [color-scheme:dark] cursor-pointer font-bold" />
-
-              <select value={walkInService?.id || ''} onChange={(e) => setWalkInService(adminServices.find(s => s.id === e.target.value))} className="w-full sm:w-1/3 bg-[var(--color-brand-900)] border border-orange-500/50 rounded-xl p-4 outline-none appearance-none cursor-pointer font-bold text-orange-400">
-                <option value="" disabled>Select Service...</option>
-                {adminServices.map(s => <option key={s.id} value={s.id}>{s.name} ({s.duration_minutes}m)</option>)}
-              </select>
-            </div>
-
-            {walkInService && (
-              <div className="animate-in slide-in-from-bottom-4 duration-300">
-                <label className="block text-xs font-bold text-orange-500 uppercase tracking-wider mb-3">Available Slots (Tap to Instantly Block)</label>
-                {walkInSlots.length === 0 ? (
-                   <div className="text-center bg-[var(--color-brand-900)] p-8 rounded-xl border border-[var(--color-brand-700)]">No availability found for this service today.</div>
-                ) : (
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    {walkInSlots.map(slot => (
-                      <button
-                        key={`${slot.time}-${slot.barberId}`}
-                        disabled={isExpressBooking}
-                        onClick={() => handleExpressWalkIn(slot.time, slot.barberId)}
-                        className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] p-3 rounded-xl hover:bg-orange-600 hover:border-orange-500 hover:text-white transition-all cursor-pointer disabled:opacity-50 flex flex-col items-center justify-center gap-1 shadow-sm"
-                      >
-                        <span className="text-lg font-bold">{formatTime(slot.time)}</span>
-                        {walkInBarberId === 'any' && (
-                          <span className="text-xs font-semibold opacity-70 uppercase tracking-wider">{slot.barberName}</span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* --- 3. MY SERVICES UI --- */}
-        {activeModule === 'services' && (
-          <div className="bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-2xl p-4 md:p-6 shadow-xl animate-in fade-in">
-            <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 mb-6">
-              <div className="flex items-center gap-3">
-                <button onClick={() => setActiveModule('home')} className="p-2 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-full hover:border-[var(--color-brand-accent)] cursor-pointer">
-                  <ArrowLeft className="w-5 h-5" />
-                </button>
-                <div>
-                  <h2 className="text-xl font-bold">My Services</h2>
-                  <p className="text-sm text-[var(--color-brand-muted)]">Manage your personal service menu.</p>
-                </div>
-              </div>
-              <select value={selectedBarberId} onChange={(e) => setSelectedBarberId(e.target.value)} className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-lg p-3 outline-none cursor-pointer font-semibold appearance-none">
-                {barbers.map(barber => <option key={barber.id} value={barber.id}>{barber.name}'s Menu</option>)}
-              </select>
-            </div>
-
-            {isOwner && (
-              <div className="mb-8 p-4 border border-[var(--color-brand-accent)] bg-[var(--color-brand-accent)]/10 rounded-xl">
-                <h3 className="text-sm font-bold text-[var(--color-brand-accent)] mb-3">Shop Owner Controls: Master Menu</h3>
-                <form onSubmit={handleAddMasterService} className="flex flex-col sm:flex-row gap-3">
-                  <input type="text" required placeholder="Inject a new global service (e.g. Mullet Fade)..." value={newMasterName} onChange={(e) => setNewMasterName(e.target.value)} className="flex-grow bg-[var(--color-brand-900)] text-white border border-[var(--color-brand-700)] rounded-lg p-3 outline-none focus:border-[var(--color-brand-accent)]" />
-                  <button type="submit" className="bg-[var(--color-brand-accent)] text-white font-bold p-3 rounded-lg hover:brightness-110 transition-all cursor-pointer whitespace-nowrap">Add to Global List</button>
-                </form>
-              </div>
-            )}
-
-            <form onSubmit={handleAddService} className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] p-4 rounded-xl mb-8 flex flex-col md:flex-row gap-4 items-end">
-              <div className="w-full md:w-2/5">
-                <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-2">Select Official Service</label>
-                <select required value={newServiceName} onChange={(e) => setNewServiceName(e.target.value)} className="w-full bg-[var(--color-brand-800)] text-white border border-[var(--color-brand-700)] rounded-lg p-3 outline-none focus:border-[var(--color-brand-accent)] appearance-none cursor-pointer">
-                  <option value="" disabled>Select Service...</option>
-                  {masterServices.map(name => <option key={name} value={name}>{name}</option>)}
-                </select>
-              </div>
-              <div className="w-full md:w-1/5">
-                <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-2">Mins</label>
-                <select value={newServiceDuration} onChange={(e) => setNewServiceDuration(e.target.value)} className="w-full bg-[var(--color-brand-800)] text-white border border-[var(--color-brand-700)] rounded-lg p-3 outline-none focus:border-[var(--color-brand-accent)] appearance-none cursor-pointer">
-                  {[15, 30, 45, 60, 75, 90, 105, 120].map(mins => <option key={mins} value={mins}>{mins}</option>)}
-                </select>
-              </div>
-              <div className="w-full md:w-1/5">
-                <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-2">Price ($)</label>
-                <input type="number" required placeholder="40" value={newServicePrice} onChange={(e) => setNewServicePrice(e.target.value)} className="w-full bg-[var(--color-brand-800)] text-white border border-[var(--color-brand-700)] rounded-lg p-3 outline-none focus:border-[var(--color-brand-accent)]" />
-              </div>
-              <div className="w-full md:w-1/5">
-                <button type="submit" disabled={isSubmittingService || !newServiceName} className="w-full bg-[var(--color-brand-accent)] text-white font-bold p-3 rounded-lg hover:brightness-110 transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50">
-                  <Plus className="w-5 h-5" /> Add
-                </button>
-              </div>
-            </form>
-
-            <div className="space-y-3">
-              {myServices.length === 0 ? (
-                 <div className="text-center py-8 text-[var(--color-brand-muted)] border border-dashed border-[var(--color-brand-700)] rounded-xl">No services found. Add your first service above.</div>
-              ) : (
-                myServices.map(service => (
-                  <div key={service.id} className={`bg-[var(--color-brand-900)] border p-4 rounded-xl transition-colors ${service.is_active ? 'border-[var(--color-brand-700)]' : 'border-red-900/50 opacity-50'}`}>
-
-                    {editingServiceId === service.id ? (
-                      <div className="flex flex-col sm:flex-row items-center gap-3">
-                        <select value={editForm.name} onChange={(e) => setEditForm({...editForm, name: e.target.value})} className="w-full sm:w-1/2 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] p-2 rounded outline-none cursor-pointer appearance-none">
-                          {masterServices.map(name => <option key={name} value={name}>{name}</option>)}
-                        </select>
-                        <select value={editForm.duration} onChange={(e) => setEditForm({...editForm, duration: e.target.value})} className="w-full sm:w-1/4 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] p-2 rounded outline-none cursor-pointer appearance-none">
-                          {[15, 30, 45, 60, 75, 90, 105, 120].map(mins => <option key={mins} value={mins}>{mins}m</option>)}
-                        </select>
-                        <input type="number" value={editForm.price} onChange={(e) => setEditForm({...editForm, price: e.target.value})} className="w-full sm:w-1/4 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] p-2 rounded outline-none" />
-                        <div className="flex gap-2 w-full sm:w-auto">
-                          <button onClick={() => handleSaveEdit(service.id)} className="bg-[var(--color-brand-accent)] text-white p-2 rounded hover:brightness-110 flex-1 sm:flex-none cursor-pointer"><Save className="w-5 h-5 mx-auto" /></button>
-                          <button onClick={() => setEditingServiceId(null)} className="bg-[var(--color-brand-700)] text-white p-2 rounded hover:bg-[var(--color-brand-muted)] flex-1 sm:flex-none cursor-pointer"><X className="w-5 h-5 mx-auto" /></button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-4">
-                          <div className={`p-3 rounded-full ${service.is_active ? 'bg-[var(--color-brand-800)] text-[var(--color-brand-accent)]' : 'bg-red-900/20 text-red-500'}`}>
-                            <Scissors className="w-5 h-5" />
-                          </div>
-                          <div>
-                            <h3 className="font-bold text-lg">{service.name}</h3>
-                            <p className="text-sm text-[var(--color-brand-muted)]">{service.duration_minutes} mins • ${service.price}</p>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => {
-                              setEditForm({ name: service.name, duration: service.duration_minutes.toString(), price: service.price.toString() })
-                              setEditingServiceId(service.id)
-                            }}
-                            className="p-3 bg-[var(--color-brand-800)] rounded-lg hover:text-[var(--color-brand-accent)] transition-colors cursor-pointer"
-                          >
-                            <Edit className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={() => handleToggleService(service.id, service.is_active)}
-                            className={`p-3 rounded-lg flex items-center gap-2 text-sm font-bold transition-all cursor-pointer ${service.is_active ? 'bg-[var(--color-brand-800)] hover:bg-red-900/20 hover:text-red-400' : 'bg-green-900/20 text-green-400 hover:bg-green-900/40'}`}
-                          >
-                            {service.is_active ? <><PowerOff className="w-4 h-4"/> Disable</> : <><Power className="w-4 h-4"/> Enable</>}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* --- 4. CLIENTS UI (Placeholder for Phase 7) --- */}
-        {activeModule === 'clients' && (
-          <div className="bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-2xl p-8 text-center animate-in fade-in">
-            <button onClick={() => setActiveModule('home')} className="mb-4 text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] flex items-center justify-center gap-2 mx-auto transition-colors cursor-pointer">
-              <ArrowLeft className="w-4 h-4" /> Back to Dashboard
-            </button>
-            <p className="text-lg font-bold">Client Directory</p>
-            <p className="text-sm text-[var(--color-brand-muted)] mt-2">Module Under Construction for Phase 7 (Vagaro CSV Cutover)</p>
-          </div>
-        )}
-
-      </div>
-
-      {/* --- MODALS --- */}
-
+  // REUSABLE DASHBOARD MODALS
+  const renderModals = () => (
+    <>
       {/* APPOINTMENT DETAILS & CUT NOTES MODAL */}
       {showApptModal && selectedAppt && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
@@ -1207,6 +1065,555 @@ export default function AdminDashboard() {
            </div>
         </div>
       )}
+    </>
+  )
+
+  // --- 1. EDGE-TO-EDGE LIVE CALENDAR VIEW ---
+  if (activeModule === 'calendar') {
+    const now = new Date()
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+
+    return (
+      <div className="h-[100dvh] w-full bg-[var(--color-brand-900)] text-[var(--color-brand-light)] font-sans flex flex-col overflow-hidden relative">
+        {/* COMPACT STICKY HEADER */}
+        <header className="sticky top-0 z-40 bg-[var(--color-brand-900)]/95 backdrop-blur-md border-b border-[var(--color-brand-700)] select-none flex-shrink-0">
+          {/* Top Bar: Nav, Barber Selector, Quick Actions */}
+          <div className="flex items-center justify-between px-3 sm:px-4 py-2 border-b border-[var(--color-brand-700)]/50 gap-2">
+            <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+              <button
+                onClick={() => setActiveModule('home')}
+                title="Back to Dashboard"
+                className="p-1.5 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-lg hover:border-[var(--color-brand-accent)] hover:text-[var(--color-brand-accent)] transition-colors cursor-pointer flex-shrink-0"
+              >
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+              <div className="relative">
+                <select
+                  value={selectedBarberId}
+                  onChange={(e) => setSelectedBarberId(e.target.value)}
+                  className="bg-[var(--color-brand-800)] text-white text-xs sm:text-sm font-bold border border-[var(--color-brand-700)] rounded-lg pl-2.5 pr-7 py-1.5 outline-none focus:border-[var(--color-brand-accent)] transition-colors cursor-pointer appearance-none truncate max-w-[150px] sm:max-w-[220px]"
+                >
+                  {barbers.map(barber => (
+                    <option key={barber.id} value={barber.id}>{barber.name}</option>
+                  ))}
+                </select>
+                <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-brand-muted)] text-[10px]">
+                  ▼
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
+              <button
+                onClick={handleToday}
+                className="px-2.5 py-1.5 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] rounded-lg text-xs font-bold transition-colors cursor-pointer"
+              >
+                Today
+              </button>
+              <button
+                onClick={() => setShowManageDayModal(true)}
+                className="flex items-center gap-1 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5 text-[var(--color-brand-muted)]" />
+                <span className="hidden sm:inline">Manage</span>
+              </button>
+              <button
+                onClick={() => {
+                  setBookDate(selectedDate)
+                  setBookTime('')
+                  if (!bookService && adminServices.length > 0) setBookService(adminServices[0])
+                  setShowBookModal(true)
+                }}
+                className="flex items-center gap-1 bg-[var(--color-brand-accent)] text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:brightness-110 transition-all cursor-pointer shadow-sm"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Book</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Sub Bar: Date Navigation & Vagaro View Mode Segmented Switcher */}
+          <div className="flex items-center justify-between px-3 sm:px-4 py-2 gap-2 bg-[var(--color-brand-900)]">
+            {/* Date Nav */}
+            <div className="flex items-center gap-1 sm:gap-2 min-w-0">
+              <button
+                onClick={handlePrev}
+                className="p-1 rounded-md hover:bg-[var(--color-brand-800)] text-[var(--color-brand-muted)] hover:text-white transition-colors cursor-pointer"
+                title="Previous"
+              >
+                <ChevronLeft className="w-4 h-4 sm:w-5 sm:h-5" />
+              </button>
+              <button
+                onClick={handleNext}
+                className="p-1 rounded-md hover:bg-[var(--color-brand-800)] text-[var(--color-brand-muted)] hover:text-white transition-colors cursor-pointer"
+                title="Next"
+              >
+                <ChevronRight className="w-4 h-4 sm:w-5 sm:h-5" />
+              </button>
+
+              <div className="relative flex items-center cursor-pointer group ml-1">
+                <span className="text-xs sm:text-sm font-bold text-white group-hover:text-[var(--color-brand-accent)] transition-colors truncate">
+                  {viewMode === 'month' && `${monthNames[viewMonthDate.getMonth()]} ${viewMonthDate.getFullYear()}`}
+                  {viewMode === 'week' && `${monthNames[viewWeekStartDate.getMonth()].slice(0,3)} ${viewWeekStartDate.getDate()} – ${isSameMonth ? '' : monthNames[weekEndDate.getMonth()].slice(0,3) + ' '}${weekEndDate.getDate()}, ${viewWeekStartDate.getFullYear()}`}
+                  {viewMode === 'day' && formatDisplayDate(selectedDate)}
+                </span>
+                <Calendar className="w-3.5 h-3.5 ml-1.5 text-[var(--color-brand-muted)] group-hover:text-[var(--color-brand-accent)] transition-colors flex-shrink-0" />
+                <input
+                  type="date"
+                  value={selectedDate}
+                  onChange={(e) => {
+                    setSelectedDate(e.target.value)
+                    setBookDate(e.target.value)
+                  }}
+                  className="opacity-0 absolute inset-0 w-full h-full cursor-pointer [color-scheme:dark]"
+                />
+              </div>
+            </div>
+
+            {/* Segmented View Mode Toggle */}
+            <div className="bg-[var(--color-brand-800)] p-0.5 rounded-lg border border-[var(--color-brand-700)] flex items-center flex-shrink-0">
+              <button
+                onClick={() => setViewMode('month')}
+                className={`px-2.5 sm:px-3 py-1 rounded-md text-xs font-bold transition-all cursor-pointer ${
+                  viewMode === 'month'
+                    ? 'bg-[var(--color-brand-accent)] text-white shadow-sm'
+                    : 'text-[var(--color-brand-muted)] hover:text-white'
+                }`}
+              >
+                Month
+              </button>
+              <button
+                onClick={() => setViewMode('week')}
+                className={`px-2.5 sm:px-3 py-1 rounded-md text-xs font-bold transition-all cursor-pointer ${
+                  viewMode === 'week'
+                    ? 'bg-[var(--color-brand-accent)] text-white shadow-sm'
+                    : 'text-[var(--color-brand-muted)] hover:text-white'
+                }`}
+              >
+                Week
+              </button>
+              <button
+                onClick={() => setViewMode('day')}
+                className={`px-2.5 sm:px-3 py-1 rounded-md text-xs font-bold transition-all cursor-pointer ${
+                  viewMode === 'day'
+                    ? 'bg-[var(--color-brand-accent)] text-white shadow-sm'
+                    : 'text-[var(--color-brand-muted)] hover:text-white'
+                }`}
+              >
+                Day
+              </button>
+            </div>
+          </div>
+        </header>
+
+        {/* CALENDAR MAIN BODY (w-full flex-1 edge-to-edge) */}
+        <main className="w-full flex-1 overflow-hidden flex flex-col relative">
+          {/* DAY VIEW */}
+          {viewMode === 'day' && (
+            <div className="flex-1 w-full overflow-y-auto overflow-x-hidden relative flex flex-col">
+              {isDayOff && (
+                <div className="bg-red-950/80 border-b border-red-800 text-red-200 px-4 py-1.5 text-xs font-semibold flex items-center justify-between z-30 flex-shrink-0">
+                  <span>Barber is marked OFF for this day. Tap Manage to adjust schedule.</span>
+                  <button onClick={() => setShowManageDayModal(true)} className="underline cursor-pointer font-bold ml-2">Edit</button>
+                </div>
+              )}
+              <div className="flex flex-1 min-w-full">
+                {renderYAxis()}
+                {loadingAppts ? (
+                  <div className="flex-1 p-8 text-[var(--color-brand-muted)] flex items-center justify-center animate-pulse">
+                    Loading lineup...
+                  </div>
+                ) : (
+                  renderTimeGrid(selectedDate, appointments, isDayOff, false)
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* WEEK VIEW */}
+          {viewMode === 'week' && (
+            <div className="flex-1 w-full flex flex-col overflow-hidden">
+              {/* Sticky Day Column Headers */}
+              <div className="flex bg-[var(--color-brand-850)] border-b border-[var(--color-brand-700)] select-none flex-shrink-0">
+                <div className="w-14 sm:w-16 flex-shrink-0 border-r border-[var(--color-brand-700)] bg-[var(--color-brand-900)]" />
+                <div className="flex-1 grid grid-cols-7 min-w-[650px] md:min-w-0">
+                  {Array.from({ length: 7 }).map((_, i) => {
+                    const d = new Date(viewWeekStartDate)
+                    d.setDate(d.getDate() + i)
+                    const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+                    const isToday = dateStr === todayStr
+                    const isSelected = dateStr === selectedDate
+                    return (
+                      <button
+                        key={dateStr}
+                        onClick={() => handleDayClick(dateStr)}
+                        title={`Zoom into ${dateStr}`}
+                        className={`p-2 text-center border-r border-[var(--color-brand-700)]/60 hover:bg-[var(--color-brand-accent)]/15 transition-colors cursor-pointer group ${
+                          isToday ? 'bg-[var(--color-brand-accent)]/10' : ''
+                        }`}
+                      >
+                        <div className={`text-[10px] uppercase font-bold tracking-wider ${
+                          isToday ? 'text-[var(--color-brand-accent)]' : 'text-[var(--color-brand-muted)] group-hover:text-white'
+                        }`}>
+                          {dayNamesShort[d.getDay()]}
+                        </div>
+                        <div className={`text-sm sm:text-base font-bold ${
+                          isToday ? 'text-[var(--color-brand-accent)]' : isSelected ? 'text-white underline' : 'text-white'
+                        }`}>
+                          {d.getDate()}
+                        </div>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {/* Scrollable Week Grid */}
+              <div className="flex-1 w-full overflow-y-auto overflow-x-auto relative flex">
+                <div className="flex min-w-[max-content] md:min-w-full flex-1">
+                  {renderYAxis()}
+                  <div className="grid grid-cols-7 flex-1 min-w-[650px] md:min-w-0">
+                    {Array.from({ length: 7 }).map((_, i) => {
+                      const d = new Date(viewWeekStartDate)
+                      d.setDate(d.getDate() + i)
+                      const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+                      const dayAppts = weekAppointments.filter(a => a.appointment_date === dateStr)
+                      const isOff = weekOverrides.find(o => o.override_date === dateStr)?.is_off
+                      return (
+                        <div key={dateStr} className="flex-1 min-w-0">
+                          {renderTimeGrid(dateStr, dayAppts, isOff, true)}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* MONTH VIEW */}
+          {viewMode === 'month' && (
+            <div className="flex-1 w-full flex flex-col overflow-hidden">
+              {/* Day of Week Headers */}
+              <div className="grid grid-cols-7 border-b border-[var(--color-brand-700)] bg-[var(--color-brand-850)] py-2 select-none flex-shrink-0">
+                {dayNamesShort.map(day => (
+                  <div key={day} className="text-center text-[10px] sm:text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider">
+                    {day}
+                  </div>
+                ))}
+              </div>
+
+              {/* Month Matrix Grid */}
+              <div className="flex-1 grid grid-cols-7 auto-rows-fr gap-px bg-[var(--color-brand-700)]/40 overflow-y-auto">
+                {monthMatrix.map((date, index) => {
+                  if (!date) {
+                    return <div key={`empty-${index}`} className="bg-[var(--color-brand-900)]/40 min-h-[90px] sm:min-h-[110px]" />
+                  }
+
+                  const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+                  const isToday = dateStr === todayStr
+                  const dayAppts = monthAppointments.filter(a => a.appointment_date === dateStr)
+                  const dayOverride = monthOverrides.find(o => o.override_date === dateStr)
+                  const isOff = dayOverride?.is_off
+
+                  return (
+                    <button
+                      key={dateStr}
+                      onClick={() => handleDayClick(dateStr)}
+                      className={`bg-[var(--color-brand-900)] hover:bg-[var(--color-brand-800)]/70 transition-colors p-1.5 sm:p-2 min-h-[90px] sm:min-h-[110px] flex flex-col items-start text-left relative group cursor-pointer overflow-hidden ${
+                        isToday ? 'ring-1 ring-inset ring-[var(--color-brand-accent)]' : ''
+                      } ${isOff ? 'opacity-60' : ''}`}
+                    >
+                      {/* Date Header */}
+                      <div className="w-full flex items-center justify-between">
+                        <span className={`text-xs sm:text-sm font-bold flex items-center justify-center w-6 h-6 rounded-full ${
+                          isToday
+                            ? 'bg-[var(--color-brand-accent)] text-white shadow-sm'
+                            : 'text-[var(--color-brand-light)] group-hover:text-[var(--color-brand-accent)]'
+                        }`}>
+                          {date.getDate()}
+                        </span>
+                        {isOff && (
+                          <span className="text-[9px] font-bold text-red-400 bg-red-950/60 border border-red-800/60 px-1 rounded">
+                            OFF
+                          </span>
+                        )}
+                        {!isOff && dayAppts.length > 0 && (
+                          <span className="text-[10px] font-bold text-[var(--color-brand-accent)] hidden sm:inline">
+                            {dayAppts.length} {dayAppts.length === 1 ? 'appt' : 'appts'}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Appointment Chips inside Day Square */}
+                      {!isOff && dayAppts.length > 0 && (
+                        <div className="w-full space-y-1 overflow-hidden mt-1 flex-1">
+                          {dayAppts.slice(0, 3).map(appt => {
+                            const isBlocked = appt.status === 'blocked'
+                            const isCompleted = appt.status === 'completed'
+                            const chipBg = isBlocked
+                              ? 'bg-orange-950/80 border-orange-700/60 text-orange-200'
+                              : isCompleted
+                              ? 'bg-emerald-950/80 border-emerald-700/60 text-emerald-200'
+                              : 'bg-[var(--color-brand-800)] border-[var(--color-brand-700)] text-white group-hover:border-[var(--color-brand-accent)]/50'
+
+                            return (
+                              <div
+                                key={appt.id}
+                                className={`text-[10px] truncate px-1.5 py-0.5 rounded border font-medium flex items-center gap-1 ${chipBg}`}
+                              >
+                                <span className="text-[var(--color-brand-accent)] font-bold text-[9px] flex-shrink-0">
+                                  {formatTime(appt.start_time).replace(':00', '')}
+                                </span>
+                                <span className="truncate">
+                                  {isBlocked ? 'Blocked' : appt.clients?.name || 'Walk-In'}
+                                </span>
+                              </div>
+                            )
+                          })}
+                          {dayAppts.length > 3 && (
+                            <div className="text-[10px] text-[var(--color-brand-accent)] font-bold pl-1 leading-none">
+                              +{dayAppts.length - 3} more
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+        </main>
+
+        {/* MODALS */}
+        {renderModals()}
+      </div>
+    )
+  }
+
+  // PROTECTED DASHBOARD RENDER
+  return (
+    <div className="min-h-screen bg-[var(--color-brand-900)] text-[var(--color-brand-light)] p-4 md:p-8 font-sans relative">
+      <div className="max-w-4xl mx-auto">
+        <header className="flex items-center justify-between mb-8 border-b border-[var(--color-brand-700)] pb-6">
+          <div className="flex items-center gap-3">
+            <Shield className="text-[var(--color-brand-accent)] w-8 h-8" />
+            <div>
+              <h1 className="text-2xl font-bold">Barber Portal</h1>
+              <p className="text-sm text-[var(--color-brand-muted)]">{session.user.email}</p>
+            </div>
+          </div>
+          <button onClick={handleLogout} className="flex items-center gap-2 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] px-4 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer">
+            <LogOut className="w-4 h-4" /> Sign Out
+          </button>
+        </header>
+
+        {/* --- MAIN MODULE NAVIGATION --- */}
+        {activeModule === 'home' && (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+            <button onClick={() => setActiveModule('calendar')} className="bg-[var(--color-brand-800)] p-6 rounded-xl border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] transition-colors text-left group cursor-pointer">
+              <Calendar className="w-6 h-6 text-[var(--color-brand-accent)] mb-3" />
+              <h3 className="text-lg font-bold mb-1 group-hover:text-[var(--color-brand-accent)]">Live Calendar</h3>
+              <p className="text-xs text-[var(--color-brand-muted)]">Manage daily lineup</p>
+            </button>
+            <button onClick={() => setActiveModule('walkin')} className="bg-[var(--color-brand-800)] p-6 rounded-xl border border-[var(--color-brand-700)] hover:border-orange-500 transition-colors text-left group cursor-pointer">
+              <Zap className="w-6 h-6 text-orange-500 mb-3" />
+              <h3 className="text-lg font-bold mb-1 group-hover:text-orange-500">Express Walk-In</h3>
+              <p className="text-xs text-[var(--color-brand-muted)]">1-Tap shop lockdown</p>
+            </button>
+            <button onClick={() => setActiveModule('clients')} className="bg-[var(--color-brand-800)] p-6 rounded-xl border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] transition-colors text-left group cursor-pointer">
+              <Users className="w-6 h-6 text-[var(--color-brand-accent)] mb-3" />
+              <h3 className="text-lg font-bold mb-1 group-hover:text-[var(--color-brand-accent)]">Clients</h3>
+              <p className="text-xs text-[var(--color-brand-muted)]">Cut notes & history</p>
+            </button>
+            <button onClick={() => setActiveModule('services')} className="bg-[var(--color-brand-800)] p-6 rounded-xl border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] transition-colors text-left group cursor-pointer">
+              <Settings className="w-6 h-6 text-[var(--color-brand-accent)] mb-3" />
+              <h3 className="text-lg font-bold mb-1 group-hover:text-[var(--color-brand-accent)]">My Services</h3>
+              <p className="text-xs text-[var(--color-brand-muted)]">Prices & durations</p>
+            </button>
+          </div>
+        )}
+
+        {/* --- 2. EXPRESS WALK-IN UI --- */}
+        {activeModule === 'walkin' && (
+          <div className="bg-[var(--color-brand-800)] border border-orange-500/30 rounded-2xl p-6 shadow-[0_0_40px_rgba(249,115,22,0.1)] animate-in fade-in max-w-2xl mx-auto">
+            <div className="flex items-center gap-3 mb-8">
+              <button onClick={() => setActiveModule('home')} className="p-2 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-full hover:border-orange-500 cursor-pointer">
+                <ArrowLeft className="w-5 h-5" />
+              </button>
+              <div>
+                <h2 className="text-xl font-bold flex items-center gap-2 text-orange-500"><Zap className="w-5 h-5" /> Express Walk-In</h2>
+                <p className="text-sm text-[var(--color-brand-muted)]">Select a service, tap an open time, and instantly lock the chair.</p>
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-4 mb-8">
+              <select value={walkInBarberId} onChange={(e) => setWalkInBarberId(e.target.value)} className="w-full sm:w-1/3 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-4 outline-none appearance-none cursor-pointer font-bold">
+                <option value="any">All Available Barbers</option>
+                {barbers.map(barber => <option key={barber.id} value={barber.id}>{barber.name}</option>)}
+              </select>
+
+              <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} className="w-full sm:w-1/3 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-4 outline-none [color-scheme:dark] cursor-pointer font-bold" />
+
+              <select value={walkInService?.id || ''} onChange={(e) => setWalkInService(adminServices.find(s => s.id === e.target.value))} className="w-full sm:w-1/3 bg-[var(--color-brand-900)] border border-orange-500/50 rounded-xl p-4 outline-none appearance-none cursor-pointer font-bold text-orange-400">
+                <option value="" disabled>Select Service...</option>
+                {adminServices.map(s => <option key={s.id} value={s.id}>{s.name} ({s.duration_minutes}m)</option>)}
+              </select>
+            </div>
+
+            {walkInService && (
+              <div className="animate-in slide-in-from-bottom-4 duration-300">
+                <label className="block text-xs font-bold text-orange-500 uppercase tracking-wider mb-3">Available Slots (Tap to Instantly Block)</label>
+                {walkInSlots.length === 0 ? (
+                   <div className="text-center bg-[var(--color-brand-900)] p-8 rounded-xl border border-[var(--color-brand-700)]">No availability found for this service today.</div>
+                ) : (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    {walkInSlots.map(slot => (
+                      <button
+                        key={`${slot.time}-${slot.barberId}`}
+                        disabled={isExpressBooking}
+                        onClick={() => handleExpressWalkIn(slot.time, slot.barberId)}
+                        className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] p-3 rounded-xl hover:bg-orange-600 hover:border-orange-500 hover:text-white transition-all cursor-pointer disabled:opacity-50 flex flex-col items-center justify-center gap-1 shadow-sm"
+                      >
+                        <span className="text-lg font-bold">{formatTime(slot.time)}</span>
+                        {walkInBarberId === 'any' && (
+                          <span className="text-xs font-semibold opacity-70 uppercase tracking-wider">{slot.barberName}</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* --- 3. MY SERVICES UI --- */}
+        {activeModule === 'services' && (
+          <div className="bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-2xl p-4 md:p-6 shadow-xl animate-in fade-in">
+            <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 mb-6">
+              <div className="flex items-center gap-3">
+                <button onClick={() => setActiveModule('home')} className="p-2 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-full hover:border-[var(--color-brand-accent)] cursor-pointer">
+                  <ArrowLeft className="w-5 h-5" />
+                </button>
+                <div>
+                  <h2 className="text-xl font-bold">My Services</h2>
+                  <p className="text-sm text-[var(--color-brand-muted)]">Manage your personal service menu.</p>
+                </div>
+              </div>
+              <select value={selectedBarberId} onChange={(e) => setSelectedBarberId(e.target.value)} className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-lg p-3 outline-none cursor-pointer font-semibold appearance-none">
+                {barbers.map(barber => <option key={barber.id} value={barber.id}>{barber.name}'s Menu</option>)}
+              </select>
+            </div>
+
+            {isOwner && (
+              <div className="mb-8 p-4 border border-[var(--color-brand-accent)] bg-[var(--color-brand-accent)]/10 rounded-xl">
+                <h3 className="text-sm font-bold text-[var(--color-brand-accent)] mb-3">Shop Owner Controls: Master Menu</h3>
+                <form onSubmit={handleAddMasterService} className="flex flex-col sm:flex-row gap-3">
+                  <input type="text" required placeholder="Inject a new global service (e.g. Mullet Fade)..." value={newMasterName} onChange={(e) => setNewMasterName(e.target.value)} className="flex-grow bg-[var(--color-brand-900)] text-white border border-[var(--color-brand-700)] rounded-lg p-3 outline-none focus:border-[var(--color-brand-accent)]" />
+                  <button type="submit" className="bg-[var(--color-brand-accent)] text-white font-bold p-3 rounded-lg hover:brightness-110 transition-all cursor-pointer whitespace-nowrap">Add to Global List</button>
+                </form>
+              </div>
+            )}
+
+            <form onSubmit={handleAddService} className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] p-4 rounded-xl mb-8 flex flex-col md:flex-row gap-4 items-end">
+              <div className="w-full md:w-2/5">
+                <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-2">Select Official Service</label>
+                <select required value={newServiceName} onChange={(e) => setNewServiceName(e.target.value)} className="w-full bg-[var(--color-brand-800)] text-white border border-[var(--color-brand-700)] rounded-lg p-3 outline-none focus:border-[var(--color-brand-accent)] appearance-none cursor-pointer">
+                  <option value="" disabled>Select Service...</option>
+                  {masterServices.map(name => <option key={name} value={name}>{name}</option>)}
+                </select>
+              </div>
+              <div className="w-full md:w-1/5">
+                <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-2">Mins</label>
+                <select value={newServiceDuration} onChange={(e) => setNewServiceDuration(e.target.value)} className="w-full bg-[var(--color-brand-800)] text-white border border-[var(--color-brand-700)] rounded-lg p-3 outline-none focus:border-[var(--color-brand-accent)] appearance-none cursor-pointer">
+                  {[15, 30, 45, 60, 75, 90, 105, 120].map(mins => <option key={mins} value={mins}>{mins}</option>)}
+                </select>
+              </div>
+              <div className="w-full md:w-1/5">
+                <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-2">Price ($)</label>
+                <input type="number" required placeholder="40" value={newServicePrice} onChange={(e) => setNewServicePrice(e.target.value)} className="w-full bg-[var(--color-brand-800)] text-white border border-[var(--color-brand-700)] rounded-lg p-3 outline-none focus:border-[var(--color-brand-accent)]" />
+              </div>
+              <div className="w-full md:w-1/5">
+                <button type="submit" disabled={isSubmittingService || !newServiceName} className="w-full bg-[var(--color-brand-accent)] text-white font-bold p-3 rounded-lg hover:brightness-110 transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50">
+                  <Plus className="w-5 h-5" /> Add
+                </button>
+              </div>
+            </form>
+
+            <div className="space-y-3">
+              {myServices.length === 0 ? (
+                 <div className="text-center py-8 text-[var(--color-brand-muted)] border border-dashed border-[var(--color-brand-700)] rounded-xl">No services found. Add your first service above.</div>
+              ) : (
+                myServices.map(service => (
+                  <div key={service.id} className={`bg-[var(--color-brand-900)] border p-4 rounded-xl transition-colors ${service.is_active ? 'border-[var(--color-brand-700)]' : 'border-red-900/50 opacity-50'}`}>
+
+                    {editingServiceId === service.id ? (
+                      <div className="flex flex-col sm:flex-row items-center gap-3">
+                        <select value={editForm.name} onChange={(e) => setEditForm({...editForm, name: e.target.value})} className="w-full sm:w-1/2 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] p-2 rounded outline-none cursor-pointer appearance-none">
+                          {masterServices.map(name => <option key={name} value={name}>{name}</option>)}
+                        </select>
+                        <select value={editForm.duration} onChange={(e) => setEditForm({...editForm, duration: e.target.value})} className="w-full sm:w-1/4 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] p-2 rounded outline-none cursor-pointer appearance-none">
+                          {[15, 30, 45, 60, 75, 90, 105, 120].map(mins => <option key={mins} value={mins}>{mins}m</option>)}
+                        </select>
+                        <input type="number" value={editForm.price} onChange={(e) => setEditForm({...editForm, price: e.target.value})} className="w-full sm:w-1/4 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] p-2 rounded outline-none" />
+                        <div className="flex gap-2 w-full sm:w-auto">
+                          <button onClick={() => handleSaveEdit(service.id)} className="bg-[var(--color-brand-accent)] text-white p-2 rounded hover:brightness-110 flex-1 sm:flex-none cursor-pointer"><Save className="w-5 h-5 mx-auto" /></button>
+                          <button onClick={() => setEditingServiceId(null)} className="bg-[var(--color-brand-700)] text-white p-2 rounded hover:bg-[var(--color-brand-muted)] flex-1 sm:flex-none cursor-pointer"><X className="w-5 h-5 mx-auto" /></button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-4">
+                          <div className={`p-3 rounded-full ${service.is_active ? 'bg-[var(--color-brand-800)] text-[var(--color-brand-accent)]' : 'bg-red-900/20 text-red-500'}`}>
+                            <Scissors className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <h3 className="font-bold text-lg">{service.name}</h3>
+                            <p className="text-sm text-[var(--color-brand-muted)]">{service.duration_minutes} mins • ${service.price}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => {
+                              setEditForm({ name: service.name, duration: service.duration_minutes.toString(), price: service.price.toString() })
+                              setEditingServiceId(service.id)
+                            }}
+                            className="p-3 bg-[var(--color-brand-800)] rounded-lg hover:text-[var(--color-brand-accent)] transition-colors cursor-pointer"
+                          >
+                            <Edit className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => handleToggleService(service.id, service.is_active)}
+                            className={`p-3 rounded-lg flex items-center gap-2 text-sm font-bold transition-all cursor-pointer ${service.is_active ? 'bg-[var(--color-brand-800)] hover:bg-red-900/20 hover:text-red-400' : 'bg-green-900/20 text-green-400 hover:bg-green-900/40'}`}
+                          >
+                            {service.is_active ? <><PowerOff className="w-4 h-4"/> Disable</> : <><Power className="w-4 h-4"/> Enable</>}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* --- 4. CLIENTS UI (Placeholder for Phase 7) --- */}
+        {activeModule === 'clients' && (
+          <div className="bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-2xl p-8 text-center animate-in fade-in">
+            <button onClick={() => setActiveModule('home')} className="mb-4 text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] flex items-center justify-center gap-2 mx-auto transition-colors cursor-pointer">
+              <ArrowLeft className="w-4 h-4" /> Back to Dashboard
+            </button>
+            <p className="text-lg font-bold">Client Directory</p>
+            <p className="text-sm text-[var(--color-brand-muted)] mt-2">Module Under Construction for Phase 7 (Vagaro CSV Cutover)</p>
+          </div>
+        )}
+
+      </div>
+
+      {renderModals()}
     </div>
   )
 }
