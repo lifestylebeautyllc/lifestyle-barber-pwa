@@ -101,13 +101,12 @@ export default function AdminDashboard() {
   const [weekAppointments, setWeekAppointments] = useState<any[]>([])
   const [weekOverrides, setWeekOverrides] = useState<any[]>([])
 
-  // Drag and Drop Rescheduling State
-  const [draggedAppt, setDraggedAppt] = useState<any>(null)
-  const [dragOverTarget, setDragOverTarget] = useState<{ date: string, time: string } | null>(null)
-  const [isDragging, setIsDragging] = useState(false)
-  const [touchDragPos, setTouchDragPos] = useState<{ x: number, y: number } | null>(null)
+  // Mobile Touch Drag-and-Drop Rescheduling State
+  const [touchDraggedAppt, setTouchDraggedAppt] = useState<any>(null)
+  const [touchPos, setTouchPos] = useState<{ x: number, y: number } | null>(null)
+  const [hoveredDropSlot, setHoveredDropSlot] = useState<{ date: string, time: string } | null>(null)
   const [isRescheduling, setIsRescheduling] = useState(false)
-  const touchRef = useRef<{ startX: number, startY: number, appt: any, moved: boolean } | null>(null)
+  const touchStartRef = useRef<{ clientX: number, clientY: number, appt: any, hasMoved: boolean } | null>(null)
   const justDraggedRef = useRef(false)
 
   // --- MODALS STATE ---
@@ -118,6 +117,7 @@ export default function AdminDashboard() {
   const [bookSlots, setBookSlots] = useState<string[]>([])
   const [clientName, setClientName] = useState('')
   const [clientPhone, setClientPhone] = useState('')
+  const [bookNotes, setBookNotes] = useState('')
   const [isBooking, setIsBooking] = useState(false)
 
   const [showManageDayModal, setShowManageDayModal] = useState(false)
@@ -431,7 +431,8 @@ export default function AdminDashboard() {
         appointment_date: bookDate,
         start_time: `${bookTime}:00`,
         end_time: endTimeStr,
-        status: 'booked'
+        status: 'booked',
+        notes: bookNotes.trim() || null
       })
       if (apptErr) throw apptErr
 
@@ -463,7 +464,7 @@ export default function AdminDashboard() {
         console.error("SMS Dispatch Failed:", smsErr)
       }
 
-      setShowBookModal(false); setBookService(null); setBookTime(''); setClientName(''); setClientPhone(''); setRefreshTrigger(prev => prev + 1)
+      setShowBookModal(false); setBookService(null); setBookTime(''); setClientName(''); setClientPhone(''); setBookNotes(''); setRefreshTrigger(prev => prev + 1)
     } catch (error: any) { console.error(error); alert(`Failed to book appointment: ${error?.message || 'Unknown error'}`) }
     finally { setIsBooking(false) }
   }
@@ -815,6 +816,91 @@ export default function AdminDashboard() {
     </div>
   )
 
+  // --- MOBILE TOUCH DRAG-AND-DROP RESCHEDULING ENGINE ---
+  const handleTouchStart = (e: React.TouchEvent, appt: any) => {
+    const touch = e.touches[0]
+    touchStartRef.current = {
+      clientX: touch.clientX,
+      clientY: touch.clientY,
+      appt,
+      hasMoved: false
+    }
+    setTouchDraggedAppt(appt)
+    setTouchPos({ x: touch.clientX, y: touch.clientY })
+  }
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!touchStartRef.current) return
+    const touch = e.touches[0]
+    const dx = touch.clientX - touchStartRef.current.clientX
+    const dy = touch.clientY - touchStartRef.current.clientY
+    if (Math.hypot(dx, dy) >= 10) {
+      touchStartRef.current.hasMoved = true
+    }
+
+    if (touchStartRef.current.hasMoved) {
+      if (e.cancelable) e.preventDefault()
+      setTouchPos({ x: touch.clientX, y: touch.clientY })
+
+      const elem = document.elementFromPoint(touch.clientX, touch.clientY)
+      const colElem = elem?.closest('[data-day-column="true"]') as HTMLElement | null
+      if (colElem) {
+        const colDate = colElem.dataset.date || selectedDate
+        const rect = colElem.getBoundingClientRect()
+        const relativeY = touch.clientY - rect.top
+        const maxSlotIndex = (TOTAL_HOURS * 4) - 1
+        const slotIndex = Math.max(0, Math.min(maxSlotIndex, Math.floor(relativeY / (PIXELS_PER_HOUR / 4))))
+        const totalMins = CALENDAR_START_HOUR * 60 + (slotIndex * 15)
+        const slotTime = `${Math.floor(totalMins / 60).toString().padStart(2, '0')}:${(totalMins % 60).toString().padStart(2, '0')}`
+        setHoveredDropSlot({ date: colDate, time: slotTime })
+      } else {
+        setHoveredDropSlot(null)
+      }
+    }
+  }
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (!touchStartRef.current) return
+    const { appt, hasMoved } = touchStartRef.current
+
+    if (!hasMoved) {
+      // Tap without moving (< 10px) -> Open Appointment Detail modal
+      handleOpenAppt(appt)
+    } else {
+      // Dragged >= 10px -> Reschedule
+      justDraggedRef.current = true
+      setTimeout(() => { justDraggedRef.current = false }, 350)
+
+      const touch = e.changedTouches[0]
+      const elem = document.elementFromPoint(touch.clientX, touch.clientY)
+      const colElem = elem?.closest('[data-day-column="true"]') as HTMLElement | null
+      const targetColumn = colElem || (document.querySelector(`[data-day-column="true"][data-date="${hoveredDropSlot?.date || selectedDate}"]`) as HTMLElement | null) || (document.querySelector('[data-day-column="true"]') as HTMLElement | null)
+
+      if (targetColumn) {
+        const targetDate = targetColumn.dataset.date || hoveredDropSlot?.date || selectedDate
+        const rect = targetColumn.getBoundingClientRect()
+        const relativeY = touch.clientY - rect.top
+        const maxSlotIndex = (TOTAL_HOURS * 4) - 1
+        const slotIndex = Math.max(0, Math.min(maxSlotIndex, Math.floor(relativeY / (PIXELS_PER_HOUR / 4))))
+        const totalMins = CALENDAR_START_HOUR * 60 + (slotIndex * 15)
+        const slotTime = `${Math.floor(totalMins / 60).toString().padStart(2, '0')}:${(totalMins % 60).toString().padStart(2, '0')}`
+        handleDropReschedule(appt, targetDate, slotTime)
+      }
+    }
+
+    touchStartRef.current = null
+    setTouchDraggedAppt(null)
+    setTouchPos(null)
+    setHoveredDropSlot(null)
+  }
+
+  const handleTouchCancel = () => {
+    touchStartRef.current = null
+    setTouchDraggedAppt(null)
+    setTouchPos(null)
+    setHoveredDropSlot(null)
+  }
+
   // REUSABLE TIME-RAIL RENDER ENGINE (ZERO BORDER DRIFT - GRADIENT-BASED)
   const renderTimeGrid = (gridDate: string, gridAppts: any[], isOff: boolean | undefined, isWeekView = false) => {
     const now = new Date()
@@ -828,21 +914,6 @@ export default function AdminDashboard() {
       <div
         data-day-column="true"
         data-date={gridDate}
-        onDragOver={(e) => {
-          e.preventDefault()
-          e.dataTransfer.dropEffect = 'move'
-        }}
-        onDrop={(e) => {
-          e.preventDefault()
-          if (!draggedAppt) return
-          const rect = e.currentTarget.getBoundingClientRect()
-          const relativeY = e.clientY - rect.top
-          const slotIndex = Math.floor(Math.max(0, Math.min(TOTAL_RAIL_HEIGHT - 1, relativeY)) / SLOT_HEIGHT)
-          const totalMins = CALENDAR_START_HOUR * 60 + (slotIndex * 15)
-          const slotTime = `${Math.floor(totalMins / 60).toString().padStart(2, '0')}:${(totalMins % 60).toString().padStart(2, '0')}`
-          setDragOverTarget(null)
-          handleDropReschedule(draggedAppt, gridDate, slotTime)
-        }}
         className={`relative flex-1 w-full ${isWeekView ? 'border-r border-[var(--color-brand-700)]/60 min-w-0' : 'w-full'}`}
         style={{
           height: `${TOTAL_RAIL_HEIGHT}px`,
@@ -867,7 +938,7 @@ export default function AdminDashboard() {
         {Array.from({ length: TOTAL_HOURS * 4 }).map((_, i) => {
           const totalMins = CALENDAR_START_HOUR * 60 + (i * 15)
           const timeStr = `${Math.floor(totalMins / 60).toString().padStart(2, '0')}:${(totalMins % 60).toString().padStart(2, '0')}`
-          const isSlotHovered = dragOverTarget?.date === gridDate && dragOverTarget?.time === timeStr
+          const isSlotHovered = hoveredDropSlot?.date === gridDate && hoveredDropSlot?.time === timeStr
 
           return (
             <button
@@ -875,29 +946,8 @@ export default function AdminDashboard() {
               data-slot="true"
               data-date={gridDate}
               data-time={timeStr}
-              onDragOver={(e) => {
-                e.preventDefault()
-                e.stopPropagation()
-                e.dataTransfer.dropEffect = 'move'
-                if (dragOverTarget?.date !== gridDate || dragOverTarget?.time !== timeStr) {
-                  setDragOverTarget({ date: gridDate, time: timeStr })
-                }
-              }}
-              onDragLeave={() => {
-                if (dragOverTarget?.date === gridDate && dragOverTarget?.time === timeStr) {
-                  setDragOverTarget(null)
-                }
-              }}
-              onDrop={(e) => {
-                e.preventDefault()
-                e.stopPropagation()
-                setDragOverTarget(null)
-                if (draggedAppt) {
-                  handleDropReschedule(draggedAppt, gridDate, timeStr)
-                }
-              }}
               onClick={() => {
-                if (isDragging || justDraggedRef.current) return
+                if (touchDraggedAppt || justDraggedRef.current) return
                 setBookDate(gridDate)
                 setBookTime(timeStr)
                 if (!bookService && adminServices.length > 0) setBookService(adminServices[0])
@@ -908,7 +958,7 @@ export default function AdminDashboard() {
                 isOff
                   ? 'pointer-events-none opacity-0'
                   : isSlotHovered
-                  ? 'bg-[var(--color-brand-accent)]/35 ring-1 ring-inset ring-[var(--color-brand-accent)] cursor-copy'
+                  ? 'bg-[var(--color-brand-accent)]/35 ring-1 ring-inset ring-[var(--color-brand-accent)]'
                   : 'cursor-pointer hover:bg-[var(--color-brand-accent)]/15 active:bg-[var(--color-brand-accent)]/25'
               }`}
               style={{
@@ -916,7 +966,7 @@ export default function AdminDashboard() {
                 height: `${SLOT_HEIGHT}px`,
               }}
             >
-              {isSlotHovered && draggedAppt && (
+              {isSlotHovered && touchDraggedAppt && (
                 <div className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white pointer-events-none bg-[var(--color-brand-accent)]/30 truncate px-1">
                   Reschedule: {formatTime(timeStr)}
                 </div>
@@ -944,7 +994,7 @@ export default function AdminDashboard() {
 
           const isBlocked = appt.status === 'blocked'
           const isCompleted = appt.status === 'completed'
-          const isThisBeingDragged = draggedAppt?.id === appt.id
+          const isThisBeingDragged = touchDraggedAppt?.id === appt.id
 
           const colorClasses = isBlocked
             ? 'bg-orange-950/90 border-orange-500/80 text-orange-200'
@@ -952,108 +1002,29 @@ export default function AdminDashboard() {
             ? 'bg-emerald-950/90 border-emerald-500/80 text-emerald-200'
             : 'bg-[var(--color-brand-800)] border-[var(--color-brand-accent)] text-white shadow-md'
 
-          const dragHandlers = {
-            draggable: true,
-            onDragStart: (e: React.DragEvent) => {
-              e.dataTransfer.setData('text/plain', appt.id)
-              e.dataTransfer.effectAllowed = 'move'
-              setDraggedAppt(appt)
-              setIsDragging(true)
-            },
-            onDragEnd: () => {
-              setDraggedAppt(null)
-              setIsDragging(false)
-              setDragOverTarget(null)
-            },
-            onTouchStart: (e: React.TouchEvent) => {
-              const touch = e.touches[0]
-              touchRef.current = { startX: touch.clientX, startY: touch.clientY, appt, moved: false }
-            },
-            onTouchMove: (e: React.TouchEvent) => {
-              if (!touchRef.current) return
-              const touch = e.touches[0]
-              const dx = touch.clientX - touchRef.current.startX
-              const dy = touch.clientY - touchRef.current.startY
-              if (!touchRef.current.moved && Math.hypot(dx, dy) > 8) {
-                touchRef.current.moved = true
-                setIsDragging(true)
-                setDraggedAppt(touchRef.current.appt)
-              }
-              if (touchRef.current.moved) {
-                if (e.cancelable) e.preventDefault()
-                setTouchDragPos({ x: touch.clientX, y: touch.clientY })
-                const elem = document.elementFromPoint(touch.clientX, touch.clientY)
-                const colElem = elem?.closest('[data-day-column="true"]') as HTMLElement | null
-                if (colElem) {
-                  const colDate = colElem.dataset.date
-                  const rect = colElem.getBoundingClientRect()
-                  const relativeY = touch.clientY - rect.top
-                  const slotIndex = Math.floor(Math.max(0, Math.min(TOTAL_RAIL_HEIGHT - 1, relativeY)) / SLOT_HEIGHT)
-                  const totalMins = CALENDAR_START_HOUR * 60 + (slotIndex * 15)
-                  const slotTime = `${Math.floor(totalMins / 60).toString().padStart(2, '0')}:${(totalMins % 60).toString().padStart(2, '0')}`
-                  if (colDate) setDragOverTarget({ date: colDate, time: slotTime })
-                } else {
-                  setDragOverTarget(null)
-                }
-              }
-            },
-            onTouchEnd: (e: React.TouchEvent) => {
-              if (touchRef.current?.moved && touchRef.current.appt) {
-                justDraggedRef.current = true
-                setTimeout(() => { justDraggedRef.current = false }, 350)
-                const apptToMove = touchRef.current.appt
-                const touch = e.changedTouches[0]
-                const elem = document.elementFromPoint(touch.clientX, touch.clientY)
-                const colElem = elem?.closest('[data-day-column="true"]') as HTMLElement | null
-                if (colElem) {
-                  const colDate = colElem.dataset.date
-                  const rect = colElem.getBoundingClientRect()
-                  const relativeY = touch.clientY - rect.top
-                  const slotIndex = Math.floor(Math.max(0, Math.min(TOTAL_RAIL_HEIGHT - 1, relativeY)) / SLOT_HEIGHT)
-                  const totalMins = CALENDAR_START_HOUR * 60 + (slotIndex * 15)
-                  const slotTime = `${Math.floor(totalMins / 60).toString().padStart(2, '0')}:${(totalMins % 60).toString().padStart(2, '0')}`
-                  if (colDate) {
-                    handleDropReschedule(apptToMove, colDate, slotTime)
-                  }
-                }
-              } else if (!touchRef.current?.moved && touchRef.current?.appt) {
-                handleOpenAppt(touchRef.current.appt)
-              }
-              touchRef.current = null
-              setIsDragging(false)
-              setDraggedAppt(null)
-              setTouchDragPos(null)
-              setDragOverTarget(null)
-            },
-            onTouchCancel: () => {
-              touchRef.current = null
-              setIsDragging(false)
-              setDraggedAppt(null)
-              setTouchDragPos(null)
-              setDragOverTarget(null)
-            }
-          }
-
           if (isWeekView) {
             return (
               <button
                 key={appt.id}
-                {...dragHandlers}
+                onTouchStart={(e) => handleTouchStart(e, appt)}
+                onTouchMove={handleTouchMove}
+                onTouchEnd={handleTouchEnd}
+                onTouchCancel={handleTouchCancel}
                 onClick={(e) => {
                   e.stopPropagation()
-                  if (isDragging || justDraggedRef.current) return
+                  if (touchDraggedAppt || justDraggedRef.current) return
                   handleOpenAppt(appt)
                 }}
                 className={`absolute left-px right-px m-0 box-border rounded-sm p-0.5 sm:p-1 overflow-hidden border shadow-sm flex flex-col text-left z-20 cursor-grab active:cursor-grabbing hover:brightness-125 transition-all touch-none select-none ${
-                  isThisBeingDragged ? 'opacity-40 ring-2 ring-[var(--color-brand-accent)]' : ''
+                  isThisBeingDragged ? 'opacity-30 ring-2 ring-[var(--color-brand-accent)]' : ''
                 } ${colorClasses}`}
-                style={{ top: `${top}px`, height: `${height}px` }}
+                style={{ top: `${top}px`, height: `${height}px`, touchAction: 'none' }}
               >
-                <div className="text-[9px] sm:text-[10px] font-bold leading-tight truncate overflow-hidden whitespace-nowrap w-full">
+                <div className="text-[9px] sm:text-[10px] font-bold leading-tight truncate overflow-hidden whitespace-nowrap w-full pointer-events-none">
                   {formatTime(appt.start_time).replace(':00', '')} {isBlocked ? 'BLOCKED' : appt.clients?.name || 'Walk-In'}
                 </div>
                 {height >= 35 && (
-                  <div className="text-[8px] sm:text-[9px] opacity-75 truncate overflow-hidden whitespace-nowrap leading-none mt-0.5 w-full">
+                  <div className="text-[8px] sm:text-[9px] opacity-75 truncate overflow-hidden whitespace-nowrap leading-none mt-0.5 w-full pointer-events-none">
                     {isBlocked ? 'Blocked' : formatTime(appt.end_time).replace(':00', '')}
                   </div>
                 )}
@@ -1064,18 +1035,22 @@ export default function AdminDashboard() {
           return (
             <button
               key={appt.id}
-              {...dragHandlers}
-              onClick={() => {
-                if (isDragging || justDraggedRef.current) return
+              onTouchStart={(e) => handleTouchStart(e, appt)}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              onTouchCancel={handleTouchCancel}
+              onClick={(e) => {
+                e.stopPropagation()
+                if (touchDraggedAppt || justDraggedRef.current) return
                 handleOpenAppt(appt)
               }}
               className={`absolute left-1.5 right-1.5 m-0 box-border rounded-lg p-2 overflow-hidden border shadow-md flex flex-col text-left z-20 cursor-grab active:cursor-grabbing hover:brightness-110 transition-all touch-none select-none ${
-                isThisBeingDragged ? 'opacity-40 ring-2 ring-[var(--color-brand-accent)]' : ''
+                isThisBeingDragged ? 'opacity-30 ring-2 ring-[var(--color-brand-accent)]' : ''
               } ${colorClasses}`}
-              style={{ top: `${top}px`, height: `${height}px` }}
+              style={{ top: `${top}px`, height: `${height}px`, touchAction: 'none' }}
             >
               {height <= 25 ? (
-                <div className="flex items-center justify-between text-xs font-bold leading-none">
+                <div className="flex items-center justify-between text-xs font-bold leading-none pointer-events-none">
                   <span className="truncate flex items-center gap-1">
                     {isBlocked && <Lock className="w-3 h-3 flex-shrink-0 text-orange-400" />}
                     {isBlocked ? 'BLOCKED TIME' : appt.clients?.name || 'Walk-In'}
@@ -1085,7 +1060,7 @@ export default function AdminDashboard() {
                   </span>
                 </div>
               ) : (
-                <>
+                <div className="pointer-events-none flex flex-col h-full">
                   <div className={`text-xs font-bold flex items-center justify-between ${
                     isBlocked ? 'text-orange-400' : isCompleted ? 'text-emerald-400' : 'text-[var(--color-brand-accent)]'
                   }`}>
@@ -1103,7 +1078,7 @@ export default function AdminDashboard() {
                       {appt.clients.phone}
                     </div>
                   )}
-                </>
+                </div>
               )}
             </button>
           )
@@ -1200,7 +1175,7 @@ export default function AdminDashboard() {
            <div className="bg-[var(--color-brand-800)] w-full max-w-md rounded-2xl flex flex-col border border-[var(--color-brand-700)] shadow-2xl">
               <div className="flex items-center justify-between p-6 border-b border-[var(--color-brand-700)]">
                 <h2 className="text-xl font-bold">Manual Book</h2>
-                <button onClick={() => { setShowBookModal(false); setBookTime(''); }} className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer"><X className="w-6 h-6" /></button>
+                <button onClick={() => { setShowBookModal(false); setBookTime(''); setBookNotes(''); }} className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer"><X className="w-6 h-6" /></button>
               </div>
               <form onSubmit={handleAdminBooking} className="p-6 space-y-4">
                  <select required value={bookService?.id || ''} onChange={(e) => setBookService(adminServices.find(s => s.id === e.target.value))} className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer text-white">
@@ -1223,6 +1198,16 @@ export default function AdminDashboard() {
                     <div className="relative">
                       <Phone className="w-4 h-4 text-[var(--color-brand-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
                       <input type="tel" required placeholder="Phone Number" value={clientPhone} onChange={(e) => setClientPhone(e.target.value)} className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-[var(--color-brand-accent)]" />
+                    </div>
+                    <div className="relative">
+                      <FileText className="w-4 h-4 text-[var(--color-brand-muted)] absolute left-3 top-3.5" />
+                      <textarea
+                        placeholder="Appointment Notes (Optional)"
+                        value={bookNotes}
+                        onChange={(e) => setBookNotes(e.target.value)}
+                        rows={2}
+                        className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-[var(--color-brand-accent)] resize-none"
+                      />
                     </div>
                  </div>
                  <button type="submit" disabled={isBooking || !bookTime || !bookService || !clientName || !clientPhone} className="w-full bg-[var(--color-brand-accent)] text-white font-bold p-3 rounded-xl mt-4 cursor-pointer disabled:opacity-50 hover:not-disabled:brightness-110">Confirm Appointment</button>
@@ -1308,17 +1293,17 @@ export default function AdminDashboard() {
 
     return (
       <div className="h-[100dvh] w-full bg-[var(--color-brand-900)] text-[var(--color-brand-light)] font-sans flex flex-col overflow-hidden relative">
-        {/* Touch Drag Floating Preview */}
-        {touchDragPos && draggedAppt && (
+        {/* Touch Drag Floating Preview (Visually Detached Chip Following Finger) */}
+        {touchPos && touchDraggedAppt && (
           <div
-            className="fixed z-50 pointer-events-none -translate-x-1/2 -translate-y-full mb-3 px-3 py-1.5 rounded-xl bg-[var(--color-brand-accent)] text-white text-xs font-bold shadow-2xl border border-white/30 flex items-center gap-2 select-none"
-            style={{ left: `${touchDragPos.x}px`, top: `${touchDragPos.y - 12}px` }}
+            className="fixed z-50 pointer-events-none -translate-x-1/2 -translate-y-full mb-3 px-3.5 py-2 rounded-xl bg-[var(--color-brand-800)] text-white text-xs font-bold shadow-[0_10px_30px_rgba(0,0,0,0.8)] border-2 border-[var(--color-brand-accent)] flex items-center gap-2.5 select-none"
+            style={{ left: `${touchPos.x}px`, top: `${touchPos.y - 12}px`, touchAction: 'none' }}
           >
-            <Clock className="w-3.5 h-3.5 flex-shrink-0" />
-            <div className="flex flex-col">
-              <span className="truncate max-w-[150px]">{draggedAppt.clients?.name || 'Appointment'}</span>
-              <span className="text-[10px] opacity-90">
-                {dragOverTarget ? `${formatTime(dragOverTarget.time)} (${dragOverTarget.date})` : 'Drop to reschedule'}
+            <Clock className="w-4 h-4 text-[var(--color-brand-accent)] flex-shrink-0" />
+            <div className="flex flex-col text-left">
+              <span className="truncate max-w-[160px] text-white font-bold">{touchDraggedAppt.clients?.name || 'Appointment'}</span>
+              <span className="text-[10px] font-semibold text-[var(--color-brand-accent)]">
+                {hoveredDropSlot ? `${formatTime(hoveredDropSlot.time)} (${hoveredDropSlot.date})` : formatTime(touchDraggedAppt.start_time)}
               </span>
             </div>
           </div>
