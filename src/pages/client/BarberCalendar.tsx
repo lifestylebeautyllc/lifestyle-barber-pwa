@@ -49,6 +49,21 @@ export default function BarberCalendar() {
     const [slots, setSlots] = useState<SlotObj[]>([])
     const [loadingSlots, setLoadingSlots] = useState(false)
     const [selectedSlot, setSelectedSlot] = useState<SlotObj | null>(null)
+    const [selectedTimeGroup, setSelectedTimeGroup] = useState<string | null>(null)
+
+    // Group available slots by formatted time string (e.g., "10:00 AM")
+    const groupedSlots = slots.reduce<Record<string, SlotObj[]>>((acc, slot) => {
+        const formatted = formatTime(slot.time)
+        if (!acc[formatted]) acc[formatted] = []
+        acc[formatted].push(slot)
+        return acc
+    }, {})
+
+    const uniqueTimes = Object.keys(groupedSlots)
+
+    const handleSlotSelect = (slot: SlotObj) => {
+        setSelectedSlot(slot)
+    }
 
     const [clientName, setClientName] = useState('')
     const [clientPhone, setClientPhone] = useState('')
@@ -112,8 +127,11 @@ export default function BarberCalendar() {
     const handleBack = () => {
         if (selectedSlot) {
             setSelectedSlot(null)
+        } else if (selectedTimeGroup) {
+            setSelectedTimeGroup(null)
         } else if (selectedService) {
             setSelectedService(null)
+            setSelectedTimeGroup(null)
             setSlots([])
         } else {
             navigate(-1)
@@ -298,7 +316,7 @@ export default function BarberCalendar() {
                 </button>
                 <div>
                     <h1 className="text-2xl font-bold tracking-tight">
-                        {!selectedService ? "Select Service" : !selectedSlot ? "Select Time" : "Your Details"}
+                        {!selectedService ? "Select Service" : !selectedSlot ? (selectedTimeGroup ? "Select Barber" : "Select Time") : "Your Details"}
                     </h1>
                     <p className="text-[var(--color-brand-muted)] text-sm flex items-center gap-1">
                         {isWalkIn && !selectedSlot ? <><Zap className="w-3 h-3 text-[var(--color-brand-accent)]"/> Kiosk Mode</> : `Booking with ${selectedSlot ? selectedSlot.barberName : barberName}`}
@@ -309,7 +327,7 @@ export default function BarberCalendar() {
             {!selectedService ? (
                 <div className="space-y-4 animate-in fade-in slide-in-from-right-4">
                     {services.map(service => (
-                        <button key={service.id} onClick={() => setSelectedService(service)} className="w-full bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] transition-all p-6 rounded-2xl shadow-lg flex items-center justify-between group cursor-pointer backdrop-blur-md">
+                        <button key={service.id} onClick={() => { setSelectedService(service); setSelectedTimeGroup(null); }} className="w-full bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] transition-all p-6 rounded-2xl shadow-lg flex items-center justify-between group cursor-pointer backdrop-blur-md">
                             <div className="text-left">
                                 <h2 className="text-lg font-bold">{service.name}</h2>
                                 <p className="text-sm text-[var(--color-brand-muted)]">{service.duration_minutes} Minutes</p>
@@ -332,28 +350,87 @@ export default function BarberCalendar() {
                         <label className="flex items-center gap-2 text-[var(--color-brand-muted)] text-sm font-semibold mb-3 uppercase tracking-wider">
                             <CalendarIcon className="w-4 h-4 text-[var(--color-brand-accent)]" /> Choose Date
                         </label>
-                        <input type="date" value={selectedDate} min={new Date().toISOString().split('T')[0]} onChange={(e) => setSelectedDate(e.target.value)} className="w-full bg-transparent text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none focus:border-[var(--color-brand-accent)] transition-colors [color-scheme:dark] cursor-pointer" />
+                        <input type="date" value={selectedDate} min={new Date().toISOString().split('T')[0]} onChange={(e) => { setSelectedDate(e.target.value); setSelectedTimeGroup(null); }} className="w-full bg-transparent text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none focus:border-[var(--color-brand-accent)] transition-colors [color-scheme:dark] cursor-pointer" />
                     </div>
 
                     <div>
-                        <h2 className="text-lg font-bold mb-4 flex items-center gap-2">
-                            <Clock className="w-5 h-5 text-[var(--color-brand-accent)]" /> {isWalkIn ? 'All Available Slots' : 'Available Slots'}
-                        </h2>
-
                         {loadingSlots ? (
                             <div className="text-center text-[var(--color-brand-muted)] animate-pulse py-8">Scanning schedules...</div>
                         ) : slots.length === 0 ? (
-                            <div className="text-center bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-2xl p-8">
+                            <div className="text-center bg-[var(--color-brand-800)]/80 backdrop-blur-md border border-[var(--color-brand-700)] rounded-2xl p-8 shadow-md">
                                 <p className="text-[var(--color-brand-muted)] mb-2">No availability on this date.</p>
                             </div>
+                        ) : !selectedTimeGroup ? (
+                            <div className="animate-in fade-in duration-200">
+                                <h2 className="text-lg font-bold mb-4 flex items-center gap-2">
+                                    <Clock className="w-5 h-5 text-[var(--color-brand-accent)]" /> Available Times
+                                </h2>
+
+                                <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
+                                    {uniqueTimes.map(timeStr => (
+                                        <button
+                                            key={timeStr}
+                                            type="button"
+                                            onClick={() => setSelectedTimeGroup(timeStr)}
+                                            className="bg-[var(--color-brand-800)]/90 backdrop-blur-sm border border-[var(--color-brand-700)] text-[var(--color-brand-light)] font-bold p-3.5 rounded-xl hover:bg-[var(--color-brand-accent)] hover:border-[var(--color-brand-accent)] hover:text-white transition-all shadow-sm cursor-pointer flex flex-col items-center justify-center active:scale-95 group"
+                                        >
+                                            <span className="text-base sm:text-lg tracking-tight font-bold">{timeStr}</span>
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
                         ) : (
-                            <div className="grid grid-cols-3 gap-3">
-                                {slots.map((slot, index) => (
-                                    <button key={`${index}-${slot.barberId}`} onClick={() => setSelectedSlot(slot)} className="bg-[var(--color-brand-800)]/90 backdrop-blur-sm border border-[var(--color-brand-700)] text-[var(--color-brand-light)] font-medium p-3 rounded-xl hover:bg-[var(--color-brand-accent)] hover:border-[var(--color-brand-accent)] hover:text-[var(--color-brand-900)] transition-all shadow-sm cursor-pointer flex flex-col items-center justify-center gap-1">
-                                        <span className="text-lg">{formatTime(slot.time)}</span>
-                                        {isWalkIn && <span className="text-[10px] uppercase font-bold tracking-widest opacity-70">{slot.barberName}</span>}
+                            <div className="animate-in fade-in slide-in-from-right-4 duration-200 space-y-4">
+                                <div className="flex items-center justify-between gap-2 mb-3">
+                                    <div>
+                                        <h2 className="text-lg font-bold flex items-center gap-2">
+                                            <Clock className="w-5 h-5 text-[var(--color-brand-accent)]" /> Available at {selectedTimeGroup}
+                                        </h2>
+                                        <p className="text-xs text-[var(--color-brand-muted)]">
+                                            Choose your barber for this slot
+                                        </p>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setSelectedTimeGroup(null)}
+                                        className="text-xs font-bold text-[var(--color-brand-accent)] hover:text-white flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] transition-all cursor-pointer shadow-sm flex-shrink-0"
+                                    >
+                                        <ArrowLeft className="w-3.5 h-3.5" /> Back to Times
                                     </button>
-                                ))}
+                                </div>
+
+                                <div className="space-y-3">
+                                    {(groupedSlots[selectedTimeGroup] || []).map((slot, index) => (
+                                        <button
+                                            key={`${index}-${slot.barberId}`}
+                                            type="button"
+                                            onClick={() => handleSlotSelect(slot)}
+                                            className="w-full bg-[var(--color-brand-800)]/90 backdrop-blur-md border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] p-4 rounded-2xl flex items-center justify-between group cursor-pointer transition-all shadow-md hover:brightness-110 active:scale-[0.99]"
+                                        >
+                                            <div className="flex items-center gap-3.5 text-left">
+                                                <div className="bg-[var(--color-brand-900)] p-3 rounded-full border border-[var(--color-brand-700)] group-hover:border-[var(--color-brand-accent)] transition-colors">
+                                                    <Scissors className="w-5 h-5 text-[var(--color-brand-accent)]" />
+                                                </div>
+                                                <div>
+                                                    <h3 className="font-bold text-base text-white group-hover:text-[var(--color-brand-accent)] transition-colors">
+                                                        {slot.barberName}
+                                                    </h3>
+                                                    <p className="text-xs text-[var(--color-brand-muted)] font-medium">
+                                                        {selectedService.name} • {selectedService.duration_minutes}m
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-xs font-bold text-[var(--color-brand-accent)] bg-[var(--color-brand-accent)]/10 px-3 py-1.5 rounded-lg border border-[var(--color-brand-accent)]/30 group-hover:bg-[var(--color-brand-accent)] group-hover:text-white transition-colors">
+                                                    Select
+                                                </span>
+                                                <span className="text-[var(--color-brand-muted)] group-hover:translate-x-0.5 transition-transform text-sm">
+                                                    ❯
+                                                </span>
+                                            </div>
+                                        </button>
+                                    ))}
+                                </div>
                             </div>
                         )}
                     </div>
