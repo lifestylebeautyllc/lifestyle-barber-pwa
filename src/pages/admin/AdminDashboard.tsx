@@ -669,7 +669,7 @@ export default function AdminDashboard() {
   // REUSABLE VAGARO Y-AXIS (Hours with small :15, :30, :45 markers)
   const renderYAxis = () => (
     <div
-      className="w-14 sm:w-16 flex-shrink-0 bg-[var(--color-brand-900)] border-r border-[var(--color-brand-700)] sticky left-0 z-30 select-none"
+      className="w-12 sm:w-14 flex-shrink-0 bg-[var(--color-brand-900)] border-r border-[var(--color-brand-700)] sticky left-0 z-30 select-none"
       style={{ height: `${TOTAL_RAIL_HEIGHT}px` }}
     >
       <div className="relative w-full h-full">
@@ -682,41 +682,41 @@ export default function AdminDashboard() {
             <div key={`y-hour-${hourIdx}`}>
               {/* Top of hour marker */}
               <div
-                className="absolute right-0 pr-1.5 text-right -translate-y-1/2 flex items-center justify-end gap-1 pointer-events-none"
+                className="absolute right-0 pr-1 sm:pr-1.5 text-right -translate-y-1/2 flex items-center justify-end gap-0.5 sm:gap-1 pointer-events-none"
                 style={{ top: `${hourIdx * PIXELS_PER_HOUR}px` }}
               >
-                <span className="text-[10px] sm:text-[11px] font-bold text-[var(--color-brand-light)] leading-none whitespace-nowrap">
+                <span className="text-[9px] sm:text-[11px] font-bold text-[var(--color-brand-light)] leading-none whitespace-nowrap">
                   {hDisplay}
                 </span>
-                <span className="w-1.5 h-[1px] bg-[var(--color-brand-700)]/80" />
+                <span className="w-1 sm:w-1.5 h-[1px] bg-[var(--color-brand-700)]/80" />
               </div>
 
               {/* Sub-hour markers (:15, :30, :45) */}
               {isNotLast && (
                 <>
                   <div
-                    className="absolute right-0 pr-1.5 text-right -translate-y-1/2 flex items-center justify-end gap-1 pointer-events-none"
+                    className="absolute right-0 pr-1 sm:pr-1.5 text-right -translate-y-1/2 flex items-center justify-end gap-0.5 sm:gap-1 pointer-events-none"
                     style={{ top: `${hourIdx * PIXELS_PER_HOUR + 20}px` }}
                   >
-                    <span className="text-[9px] font-mono text-[var(--color-brand-muted)] opacity-50 leading-none">
+                    <span className="text-[8px] sm:text-[9px] font-mono text-[var(--color-brand-muted)] opacity-50 leading-none">
                       :15
                     </span>
                     <span className="w-1 h-[1px] bg-[var(--color-brand-700)]/30" />
                   </div>
                   <div
-                    className="absolute right-0 pr-1.5 text-right -translate-y-1/2 flex items-center justify-end gap-1 pointer-events-none"
+                    className="absolute right-0 pr-1 sm:pr-1.5 text-right -translate-y-1/2 flex items-center justify-end gap-0.5 sm:gap-1 pointer-events-none"
                     style={{ top: `${hourIdx * PIXELS_PER_HOUR + 40}px` }}
                   >
-                    <span className="text-[9px] font-mono text-[var(--color-brand-muted)] opacity-70 leading-none">
+                    <span className="text-[8px] sm:text-[9px] font-mono text-[var(--color-brand-muted)] opacity-70 leading-none">
                       :30
                     </span>
-                    <span className="w-1.5 h-[1px] bg-[var(--color-brand-700)]/50" />
+                    <span className="w-1 sm:w-1.5 h-[1px] bg-[var(--color-brand-700)]/50" />
                   </div>
                   <div
-                    className="absolute right-0 pr-1.5 text-right -translate-y-1/2 flex items-center justify-end gap-1 pointer-events-none"
+                    className="absolute right-0 pr-1 sm:pr-1.5 text-right -translate-y-1/2 flex items-center justify-end gap-0.5 sm:gap-1 pointer-events-none"
                     style={{ top: `${hourIdx * PIXELS_PER_HOUR + 60}px` }}
                   >
-                    <span className="text-[9px] font-mono text-[var(--color-brand-muted)] opacity-50 leading-none">
+                    <span className="text-[8px] sm:text-[9px] font-mono text-[var(--color-brand-muted)] opacity-50 leading-none">
                       :45
                     </span>
                     <span className="w-1 h-[1px] bg-[var(--color-brand-700)]/30" />
@@ -741,7 +741,7 @@ export default function AdminDashboard() {
 
     return (
       <div
-        className={`relative flex-1 ${isWeekView ? 'border-r border-[var(--color-brand-700)]/60 min-w-0' : 'w-full'}`}
+        className={`relative flex-1 w-full ${isWeekView ? 'border-r border-[var(--color-brand-700)]/60 min-w-0' : 'w-full'}`}
         style={{
           height: `${TOTAL_RAIL_HEIGHT}px`,
           backgroundImage: `
@@ -791,7 +791,7 @@ export default function AdminDashboard() {
         {/* Live Current Time Red Indicator Line */}
         {isToday && isWithinHours && !isOff && (
           <div
-            className="absolute left-0 right-0 z-20 pointer-events-none flex items-center"
+            className="absolute left-0 right-0 z-20 pointer-events-none flex items-center overflow-hidden"
             style={{ top: `${currentTop}px` }}
           >
             <div className="w-2.5 h-2.5 rounded-full bg-red-500 -ml-1 shadow-[0_0_8px_rgba(239,68,68,0.9)] ring-2 ring-[var(--color-brand-900)] flex-shrink-0" />
@@ -819,14 +819,14 @@ export default function AdminDashboard() {
               <button
                 key={appt.id}
                 onClick={(e) => { e.stopPropagation(); handleOpenAppt(appt); }}
-                className={`absolute left-0.5 right-0.5 m-0 box-border rounded p-1 overflow-hidden border shadow-sm flex flex-col text-left z-20 cursor-pointer hover:brightness-125 transition-all ${colorClasses}`}
+                className={`absolute left-px right-px m-0 box-border rounded-sm p-0.5 sm:p-1 overflow-hidden border shadow-sm flex flex-col text-left z-20 cursor-pointer hover:brightness-125 transition-all ${colorClasses}`}
                 style={{ top: `${top}px`, height: `${height}px` }}
               >
-                <div className="text-[10px] font-bold leading-tight truncate">
+                <div className="text-[9px] sm:text-[10px] font-bold leading-tight truncate overflow-hidden whitespace-nowrap w-full">
                   {formatTime(appt.start_time).replace(':00', '')} {isBlocked ? 'BLOCKED' : appt.clients?.name || 'Walk-In'}
                 </div>
                 {height >= 35 && (
-                  <div className="text-[9px] opacity-75 truncate leading-none mt-0.5">
+                  <div className="text-[8px] sm:text-[9px] opacity-75 truncate overflow-hidden whitespace-nowrap leading-none mt-0.5 w-full">
                     {isBlocked ? 'Blocked' : formatTime(appt.end_time).replace(':00', '')}
                   </div>
                 )}
@@ -1234,9 +1234,9 @@ export default function AdminDashboard() {
           {viewMode === 'week' && (
             <div className="flex-1 w-full flex flex-col overflow-hidden">
               {/* Sticky Day Column Headers */}
-              <div className="flex bg-[var(--color-brand-850)] border-b border-[var(--color-brand-700)] select-none flex-shrink-0">
-                <div className="w-14 sm:w-16 flex-shrink-0 border-r border-[var(--color-brand-700)] bg-[var(--color-brand-900)]" />
-                <div className="flex-1 grid grid-cols-7 min-w-[650px] md:min-w-0">
+              <div className="flex bg-[var(--color-brand-850)] border-b border-[var(--color-brand-700)] select-none flex-shrink-0 w-full">
+                <div className="w-12 sm:w-14 flex-shrink-0 border-r border-[var(--color-brand-700)] bg-[var(--color-brand-900)]" />
+                <div className="flex-1 grid grid-cols-7 w-full min-w-0">
                   {Array.from({ length: 7 }).map((_, i) => {
                     const d = new Date(viewWeekStartDate)
                     d.setDate(d.getDate() + i)
@@ -1248,16 +1248,16 @@ export default function AdminDashboard() {
                         key={dateStr}
                         onClick={() => handleDayClick(dateStr)}
                         title={`Zoom into ${dateStr}`}
-                        className={`p-2 text-center border-r border-[var(--color-brand-700)]/60 hover:bg-[var(--color-brand-accent)]/15 transition-colors cursor-pointer group ${
+                        className={`px-0.5 py-1.5 sm:p-2 text-center border-r border-[var(--color-brand-700)]/60 hover:bg-[var(--color-brand-accent)]/15 transition-colors cursor-pointer group min-w-0 overflow-hidden ${
                           isToday ? 'bg-[var(--color-brand-accent)]/10' : ''
                         }`}
                       >
-                        <div className={`text-[10px] uppercase font-bold tracking-wider ${
+                        <div className={`text-[9px] sm:text-[10px] uppercase font-bold tracking-tight truncate ${
                           isToday ? 'text-[var(--color-brand-accent)]' : 'text-[var(--color-brand-muted)] group-hover:text-white'
                         }`}>
                           {dayNamesShort[d.getDay()]}
                         </div>
-                        <div className={`text-sm sm:text-base font-bold ${
+                        <div className={`text-xs sm:text-base font-bold truncate ${
                           isToday ? 'text-[var(--color-brand-accent)]' : isSelected ? 'text-white underline' : 'text-white'
                         }`}>
                           {d.getDate()}
@@ -1269,10 +1269,10 @@ export default function AdminDashboard() {
               </div>
 
               {/* Scrollable Week Grid */}
-              <div className="flex-1 w-full overflow-y-auto overflow-x-auto relative flex">
-                <div className="flex min-w-[max-content] md:min-w-full flex-1">
+              <div className="flex-1 w-full overflow-y-auto overflow-x-hidden relative flex">
+                <div className="flex w-full flex-1 min-w-0">
                   {renderYAxis()}
-                  <div className="grid grid-cols-7 flex-1 min-w-[650px] md:min-w-0">
+                  <div className="grid grid-cols-7 flex-1 w-full min-w-0">
                     {Array.from({ length: 7 }).map((_, i) => {
                       const d = new Date(viewWeekStartDate)
                       d.setDate(d.getDate() + i)
@@ -1280,7 +1280,7 @@ export default function AdminDashboard() {
                       const dayAppts = weekAppointments.filter(a => a.appointment_date === dateStr)
                       const isOff = weekOverrides.find(o => o.override_date === dateStr)?.is_off
                       return (
-                        <div key={dateStr} className="flex-1 min-w-0">
+                        <div key={dateStr} className="relative min-w-0 w-full">
                           {renderTimeGrid(dateStr, dayAppts, isOff, true)}
                         </div>
                       )
