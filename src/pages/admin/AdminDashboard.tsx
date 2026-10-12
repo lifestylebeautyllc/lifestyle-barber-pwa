@@ -562,16 +562,23 @@ export default function AdminDashboard() {
     const duration = Math.max(15, apptEndMins - apptStartMins)
     const newEndMins = newStartMins + duration
 
-    const currentApptDate = apptToMove.appointment_date || selectedDate
+    // Ensure newDate is strictly formatted as YYYY-MM-DD
+    newDate = (newDate.includes('T') ? newDate.split('T')[0] : newDate).trim()
+    const currentApptDate = (apptToMove.appointment_date || selectedDate).split('T')[0].trim()
+
     // If dropped back at the same position, do nothing
     if (currentApptDate === newDate && apptStartMins === newStartMins) {
       return
     }
 
-    const endHour = Math.floor(newEndMins / 60).toString().padStart(2, '0')
-    const endMinute = (newEndMins % 60).toString().padStart(2, '0')
-    const newEndTimeStr = `${endHour}:${endMinute}:00`
-    const newStartTimeStr = `${newStartTime.slice(0, 5)}:00`
+    // Strictly zero-padded 24-hour formats (e.g., 09:15, 14:30)
+    const startHours = Math.floor(newStartMins / 60)
+    const startMins = newStartMins % 60
+    const endHours = Math.floor(newEndMins / 60)
+    const endMins = newEndMins % 60
+
+    const newStartTimeStr = `${String(startHours).padStart(2, '0')}:${String(startMins).padStart(2, '0')}`
+    const newEndTimeStr = `${String(endHours).padStart(2, '0')}:${String(endMins).padStart(2, '0')}`
 
     const targetBarberId = apptToMove.barber_id || selectedBarberId
     setIsRescheduling(true)
@@ -652,7 +659,7 @@ export default function AdminDashboard() {
         })
         .eq('id', apptToMove.id)
 
-      if (updateErr) throw updateErr
+      if (updateErr) throw new Error(updateErr.message)
 
       setRefreshTrigger(prev => prev + 1)
     } catch (err: any) {
