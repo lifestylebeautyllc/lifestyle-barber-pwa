@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, UserX, Trash2, FileText, Clock } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
-import { getAvailableSlots } from '../../lib/slotEngine'
+import { getAvailableSlots, getDayOfWeekFromDateString, getBarberDaySchedule, minutesToTime, DAYS_OF_WEEK, DEFAULT_WORKING_HOURS, type DaySchedule } from '../../lib/slotEngine'
 
 // --- HELPER FUNCTIONS ---
 function formatTime(timeStr: string) {
@@ -105,6 +105,7 @@ export default function AdminDashboard() {
   const [touchDraggedAppt, setTouchDraggedAppt] = useState<any>(null)
   const [touchPos, setTouchPos] = useState<{ x: number, y: number } | null>(null)
   const [hoveredDropSlot, setHoveredDropSlot] = useState<{ date: string, time: string } | null>(null)
+  const [isTouchDragging, setIsTouchDragging] = useState(false)
   const [isRescheduling, setIsRescheduling] = useState(false)
   const touchStartRef = useRef<{ clientX: number, clientY: number, appt: any, hasMoved: boolean } | null>(null)
   const justDraggedRef = useRef(false)
@@ -119,6 +120,12 @@ export default function AdminDashboard() {
   const [clientPhone, setClientPhone] = useState('')
   const [bookNotes, setBookNotes] = useState('')
   const [isBooking, setIsBooking] = useState(false)
+
+  // Barber Working Hours (Settings) Modal State
+  const [showBarberSettingsModal, setShowBarberSettingsModal] = useState(false)
+  const [barberWorkingHours, setBarberWorkingHours] = useState<Record<number, DaySchedule>>(DEFAULT_WORKING_HOURS)
+  const [loadingWorkingHours, setLoadingWorkingHours] = useState(false)
+  const [isSavingWorkingHours, setIsSavingWorkingHours] = useState(false)
 
   const [showManageDayModal, setShowManageDayModal] = useState(false)
   const [isDayOff, setIsDayOff] = useState(false)
@@ -177,6 +184,39 @@ export default function AdminDashboard() {
     if (selectedBarberId) supabase.from('services').select('*').eq('barber_id', selectedBarberId).eq('is_active', true).then(({ data }) => { if (data) setAdminServices(data) })
   }, [selectedBarberId])
 
+  useEffect(() => {
+    async function loadBarberWorkingHours() {
+      if (!showBarberSettingsModal || !selectedBarberId) return
+      setLoadingWorkingHours(true)
+      try {
+        const { data, error } = await supabase
+          .from('barbers')
+          .select('working_hours')
+          .eq('id', selectedBarberId)
+          .single()
+
+        if (error) throw error
+
+        if (data?.working_hours) {
+          const loaded: Record<number, DaySchedule> = { ...DEFAULT_WORKING_HOURS }
+          for (let i = 0; i < 7; i++) {
+            const sched = getBarberDaySchedule(data.working_hours, i)
+            if (sched) loaded[i] = sched
+          }
+          setBarberWorkingHours(loaded)
+        } else {
+          setBarberWorkingHours(DEFAULT_WORKING_HOURS)
+        }
+      } catch (err: any) {
+        console.error("Failed to load working hours:", err)
+        setBarberWorkingHours(DEFAULT_WORKING_HOURS)
+      } finally {
+        setLoadingWorkingHours(false)
+      }
+    }
+    loadBarberWorkingHours()
+  }, [showBarberSettingsModal, selectedBarberId])
+
   // --- DATA FETCHERS ---
   useEffect(() => {
     async function fetchLineup() {
@@ -184,7 +224,7 @@ export default function AdminDashboard() {
       setLoadingAppts(true)
       const [apptRes, overrideRes] = await Promise.all([
         supabase.from('appointments')
-          .select(`id, start_time, end_time, status, notes, clients ( id, name, phone, notes )`)
+          .select(`id, barber_id, appointment_date, start_time, end_time, status, notes, clients ( id, name, phone, notes )`)
           .eq('appointment_date', selectedDate)
           .eq('barber_id', selectedBarberId)
           .neq('status', 'cancelled')
@@ -220,7 +260,7 @@ export default function AdminDashboard() {
 
       const [apptRes, overrideRes] = await Promise.all([
         supabase.from('appointments')
-          .select('id, appointment_date, start_time, end_time, status, clients ( name )')
+          .select('id, barber_id, appointment_date, start_time, end_time, status, clients ( name )')
           .eq('barber_id', selectedBarberId)
           .gte('appointment_date', startOfMonth)
           .lte('appointment_date', endOfMonth)
@@ -247,7 +287,7 @@ export default function AdminDashboard() {
       const endOfWeek = `${endOfWeekDate.getFullYear()}-${String(endOfWeekDate.getMonth() + 1).padStart(2, '0')}-${String(endOfWeekDate.getDate()).padStart(2, '0')}`
 
       const [apptRes, overrideRes] = await Promise.all([
-        supabase.from('appointments').select('id, appointment_date, start_time, end_time, status, notes, clients ( id, name, phone, notes )').eq('barber_id', selectedBarberId).gte('appointment_date', startOfWeek).lte('appointment_date', endOfWeek).neq('status', 'cancelled').order('start_time', { ascending: true }),
+        supabase.from('appointments').select('id, barber_id, appointment_date, start_time, end_time, status, notes, clients ( id, name, phone, notes )').eq('barber_id', selectedBarberId).gte('appointment_date', startOfWeek).lte('appointment_date', endOfWeek).neq('status', 'cancelled').order('start_time', { ascending: true }),
         supabase.from('schedule_overrides').select('override_date, is_off').eq('barber_id', selectedBarberId).gte('override_date', startOfWeek).lte('override_date', endOfWeek)
       ])
       setWeekAppointments(apptRes.data || [])
@@ -385,6 +425,46 @@ export default function AdminDashboard() {
       const proposedEndTime = proposedStartTime + duration
       const endTimeStr = `${Math.floor(proposedEndTime / 60).toString().padStart(2, '0')}:${(proposedEndTime % 60).toString().padStart(2, '0')}:00`
 
+      // 1. Enforce Barber Working Hours Availability
+      const targetBarber = barbers.find(b => b.id === selectedBarberId)
+      let workingHours = targetBarber?.working_hours
+      if (!workingHours) {
+        const { data: bData } = await supabase.from('barbers').select('working_hours').eq('id', selectedBarberId).maybeSingle()
+        workingHours = bData?.working_hours
+      }
+
+      const dayOfWeek = getDayOfWeekFromDateString(bookDate)
+      const daySchedule = getBarberDaySchedule(workingHours, dayOfWeek)
+
+      // 2. Check schedule override for that specific date
+      const { data: overrideData } = await supabase
+        .from('schedule_overrides')
+        .select('*')
+        .eq('barber_id', selectedBarberId)
+        .eq('override_date', bookDate)
+        .maybeSingle()
+
+      if (overrideData?.is_off) {
+        alert("Cannot book: Barber is marked OFF on this date.")
+        return
+      }
+
+      const shiftStart = overrideData?.start_time ? toMinutes(overrideData.start_time) : daySchedule ? toMinutes(daySchedule.start_time) : null
+      const shiftEnd = overrideData?.end_time ? toMinutes(overrideData.end_time) : daySchedule ? toMinutes(daySchedule.end_time) : null
+      const isShiftWorking = overrideData ? !overrideData.is_off : daySchedule ? daySchedule.isWorking : true
+
+      if (!isShiftWorking) {
+        alert(`Cannot book: Barber is not scheduled to work on ${DAYS_OF_WEEK[dayOfWeek].name}s.`)
+        return
+      }
+
+      if (shiftStart !== null && shiftEnd !== null) {
+        if (proposedStartTime < shiftStart || proposedEndTime > shiftEnd) {
+          alert(`Cannot book: Proposed appointment time (${formatTime(bookTime)} - ${formatTime(endTimeStr)}) falls outside barber's working hours (${minutesToTime(shiftStart)} - ${minutesToTime(shiftEnd)}).`)
+          return
+        }
+      }
+
       const { data: conflicts, error: conflictErr } = await supabase
         .from('appointments')
         .select('clients ( name ), start_time, end_time')
@@ -482,8 +562,9 @@ export default function AdminDashboard() {
     const duration = Math.max(15, apptEndMins - apptStartMins)
     const newEndMins = newStartMins + duration
 
+    const currentApptDate = apptToMove.appointment_date || selectedDate
     // If dropped back at the same position, do nothing
-    if (apptToMove.appointment_date === newDate && apptStartMins === newStartMins) {
+    if (currentApptDate === newDate && apptStartMins === newStartMins) {
       return
     }
 
@@ -496,10 +577,21 @@ export default function AdminDashboard() {
     setIsRescheduling(true)
 
     try {
-      // Check if barber is marked OFF on newDate
+      // 1. Enforce Barber Working Hours Availability
+      const targetBarber = barbers.find(b => b.id === targetBarberId)
+      let workingHours = targetBarber?.working_hours
+      if (!workingHours) {
+        const { data: bData } = await supabase.from('barbers').select('working_hours').eq('id', targetBarberId).maybeSingle()
+        workingHours = bData?.working_hours
+      }
+
+      const dayOfWeek = getDayOfWeekFromDateString(newDate)
+      const daySchedule = getBarberDaySchedule(workingHours, dayOfWeek)
+
+      // 2. Check schedule override for that specific date
       const { data: overrideData } = await supabase
         .from('schedule_overrides')
-        .select('is_off')
+        .select('*')
         .eq('barber_id', targetBarberId)
         .eq('override_date', newDate)
         .maybeSingle()
@@ -509,7 +601,23 @@ export default function AdminDashboard() {
         return
       }
 
-      // C. Run strict universal collision math against the new time slot
+      const shiftStart = overrideData?.start_time ? toMinutes(overrideData.start_time) : daySchedule ? toMinutes(daySchedule.start_time) : null
+      const shiftEnd = overrideData?.end_time ? toMinutes(overrideData.end_time) : daySchedule ? toMinutes(daySchedule.end_time) : null
+      const isShiftWorking = overrideData ? !overrideData.is_off : daySchedule ? daySchedule.isWorking : true
+
+      if (!isShiftWorking) {
+        alert(`Cannot reschedule: Barber is not scheduled to work on ${DAYS_OF_WEEK[dayOfWeek].name}s.`)
+        return
+      }
+
+      if (shiftStart !== null && shiftEnd !== null) {
+        if (newStartMins < shiftStart || newEndMins > shiftEnd) {
+          alert(`Cannot reschedule: Slot (${formatTime(newStartTime)} - ${formatTime(newEndTimeStr)}) falls outside barber's working hours (${minutesToTime(shiftStart)} - ${minutesToTime(shiftEnd)}).`)
+          return
+        }
+      }
+
+      // 3. Run strict universal collision math against existing appointments (STRICTLY EXCLUDE THE DRAGGED APPOINTMENT ITSELF)
       const { data: conflicts, error: conflictErr } = await supabase
         .from('appointments')
         .select('id, clients ( name ), start_time, end_time')
@@ -521,20 +629,20 @@ export default function AdminDashboard() {
 
       if (conflicts) {
         const hasCollision = conflicts.some((c: any) => {
-          if (c.id === apptToMove.id) return false // Ignore itself
+          if (c.id === apptToMove.id || String(c.id) === String(apptToMove.id)) return false // Exclude dragged appointment itself
           const cStart = toMinutes(c.start_time)
           const cEnd = toMinutes(c.end_time)
           return (newStartMins < cEnd) && (newEndMins > cStart)
         })
 
-        // D. If it collides, snap the appointment back to its original spot and throw an alert
+        // 4. If it collides, snap the appointment back to its original spot and throw an alert
         if (hasCollision) {
           alert("Not enough time! Slot overlaps with existing booking.")
           return
         }
       }
 
-      // E. If clear, immediately run supabase update and refresh the calendar
+      // 5. If clear, immediately run supabase update and refresh the calendar
       const { error: updateErr } = await supabase
         .from('appointments')
         .update({
@@ -552,6 +660,28 @@ export default function AdminDashboard() {
       alert(`Failed to reschedule appointment: ${err?.message || 'Unknown error'}`)
     } finally {
       setIsRescheduling(false)
+    }
+  }
+
+  const handleSaveWorkingHours = async () => {
+    if (!selectedBarberId) return
+    setIsSavingWorkingHours(true)
+    try {
+      const { error } = await supabase
+        .from('barbers')
+        .update({ working_hours: barberWorkingHours })
+        .eq('id', selectedBarberId)
+
+      if (error) throw error
+      alert("Barber schedule updated successfully!")
+      setBarbers(prev => prev.map(b => b.id === selectedBarberId ? { ...b, working_hours: barberWorkingHours } : b))
+      setShowBarberSettingsModal(false)
+      setRefreshTrigger(prev => prev + 1)
+    } catch (err: any) {
+      console.error("Failed to save working hours:", err)
+      alert(`Failed to save working hours: ${err?.message || 'Database error'}`)
+    } finally {
+      setIsSavingWorkingHours(false)
     }
   }
 
@@ -836,6 +966,7 @@ export default function AdminDashboard() {
     const dy = touch.clientY - touchStartRef.current.clientY
     if (Math.hypot(dx, dy) >= 10) {
       touchStartRef.current.hasMoved = true
+      setIsTouchDragging(true)
     }
 
     if (touchStartRef.current.hasMoved) {
@@ -843,11 +974,23 @@ export default function AdminDashboard() {
       setTouchPos({ x: touch.clientX, y: touch.clientY })
 
       const elem = document.elementFromPoint(touch.clientX, touch.clientY)
-      const colElem = elem?.closest('[data-day-column="true"]') as HTMLElement | null
+      let colElem = elem?.closest('[data-day-column="true"]') as HTMLElement | null
+      if (!colElem) {
+        const allColumns = Array.from(document.querySelectorAll('[data-day-column="true"]')) as HTMLElement[]
+        colElem = allColumns.find(c => {
+          const r = c.getBoundingClientRect()
+          return touch.clientX >= r.left && touch.clientX <= r.right
+        }) || null
+      }
+
       if (colElem) {
         const colDate = colElem.dataset.date || selectedDate
-        const rect = colElem.getBoundingClientRect()
-        const relativeY = touch.clientY - rect.top
+        const scrollContainer = (colElem.closest('.overflow-y-auto') || document.querySelector('.overflow-y-auto')) as HTMLElement | null
+        const containerTop = scrollContainer ? scrollContainer.getBoundingClientRect().top : colElem.getBoundingClientRect().top
+        const scrollTop = scrollContainer ? scrollContainer.scrollTop : 0
+        const columnOffsetTop = colElem.offsetTop || 0
+        const relativeY = (touch.clientY - containerTop) + scrollTop - columnOffsetTop
+
         const maxSlotIndex = (TOTAL_HOURS * 4) - 1
         const slotIndex = Math.max(0, Math.min(maxSlotIndex, Math.floor(relativeY / (PIXELS_PER_HOUR / 4))))
         const totalMins = CALENDAR_START_HOUR * 60 + (slotIndex * 15)
@@ -873,13 +1016,33 @@ export default function AdminDashboard() {
 
       const touch = e.changedTouches[0]
       const elem = document.elementFromPoint(touch.clientX, touch.clientY)
-      const colElem = elem?.closest('[data-day-column="true"]') as HTMLElement | null
-      const targetColumn = colElem || (document.querySelector(`[data-day-column="true"][data-date="${hoveredDropSlot?.date || selectedDate}"]`) as HTMLElement | null) || (document.querySelector('[data-day-column="true"]') as HTMLElement | null)
+      let colElem = elem?.closest('[data-day-column="true"]') as HTMLElement | null
+      if (!colElem) {
+        const allColumns = Array.from(document.querySelectorAll('[data-day-column="true"]')) as HTMLElement[]
+        colElem = allColumns.find(c => {
+          const r = c.getBoundingClientRect()
+          return touch.clientX >= r.left && touch.clientX <= r.right
+        }) || null
+      }
+
+      const scrollContainer = (colElem?.closest('.overflow-y-auto') || document.querySelector('.overflow-y-auto')) as HTMLElement | null
+
+      let targetColumn = colElem
+      if (!targetColumn && hoveredDropSlot?.date) {
+        targetColumn = document.querySelector(`[data-day-column="true"][data-date="${hoveredDropSlot.date}"]`) as HTMLElement | null
+      }
+      if (!targetColumn) {
+        targetColumn = (document.querySelector(`[data-day-column="true"][data-date="${selectedDate}"]`) as HTMLElement | null)
+          || (document.querySelector('[data-day-column="true"]') as HTMLElement | null)
+      }
 
       if (targetColumn) {
         const targetDate = targetColumn.dataset.date || hoveredDropSlot?.date || selectedDate
-        const rect = targetColumn.getBoundingClientRect()
-        const relativeY = touch.clientY - rect.top
+        const containerTop = scrollContainer ? scrollContainer.getBoundingClientRect().top : targetColumn.getBoundingClientRect().top
+        const scrollTop = scrollContainer ? scrollContainer.scrollTop : 0
+        const columnOffsetTop = targetColumn.offsetTop || 0
+        const relativeY = (touch.clientY - containerTop) + scrollTop - columnOffsetTop
+
         const maxSlotIndex = (TOTAL_HOURS * 4) - 1
         const slotIndex = Math.max(0, Math.min(maxSlotIndex, Math.floor(relativeY / (PIXELS_PER_HOUR / 4))))
         const totalMins = CALENDAR_START_HOUR * 60 + (slotIndex * 15)
@@ -889,6 +1052,7 @@ export default function AdminDashboard() {
     }
 
     touchStartRef.current = null
+    setIsTouchDragging(false)
     setTouchDraggedAppt(null)
     setTouchPos(null)
     setHoveredDropSlot(null)
@@ -896,6 +1060,7 @@ export default function AdminDashboard() {
 
   const handleTouchCancel = () => {
     touchStartRef.current = null
+    setIsTouchDragging(false)
     setTouchDraggedAppt(null)
     setTouchPos(null)
     setHoveredDropSlot(null)
@@ -1216,6 +1381,161 @@ export default function AdminDashboard() {
         </div>
       )}
 
+      {/* BARBER SETTINGS / WORKING HOURS MODAL */}
+      {showBarberSettingsModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
+          <div className="bg-[var(--color-brand-800)] w-full max-w-lg rounded-2xl flex flex-col border border-[var(--color-brand-700)] shadow-2xl overflow-hidden max-h-[90vh]">
+            <div className="flex items-center justify-between p-5 sm:p-6 border-b border-[var(--color-brand-700)] flex-shrink-0">
+              <div>
+                <h2 className="text-xl font-bold flex items-center gap-2">
+                  <SlidersHorizontal className="w-5 h-5 text-[var(--color-brand-accent)]" />
+                  Barber Working Hours
+                </h2>
+                <p className="text-xs sm:text-sm text-[var(--color-brand-muted)]">
+                  {barbers.find(b => b.id === selectedBarberId)?.name || 'Selected Barber'}'s Weekly Schedule
+                </p>
+              </div>
+              <button
+                onClick={() => setShowBarberSettingsModal(false)}
+                className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer p-1 rounded-lg"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+
+            <div className="p-5 sm:p-6 space-y-3.5 overflow-y-auto flex-1">
+              {loadingWorkingHours ? (
+                <div className="text-center py-12 text-[var(--color-brand-muted)] animate-pulse">
+                  Loading schedule...
+                </div>
+              ) : (
+                DAYS_OF_WEEK.map(day => {
+                  const daySched = barberWorkingHours[day.index] || DEFAULT_WORKING_HOURS[day.index]
+                  const isWorking = daySched.isWorking
+
+                  return (
+                    <div
+                      key={day.index}
+                      className={`p-3.5 rounded-xl border transition-all ${
+                        isWorking
+                          ? 'bg-[var(--color-brand-900)] border-[var(--color-brand-700)]'
+                          : 'bg-[var(--color-brand-900)]/40 border-[var(--color-brand-700)]/40 opacity-70'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-2.5">
+                        <span className="font-bold text-sm sm:text-base text-white">
+                          {day.name}
+                        </span>
+
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-semibold ${isWorking ? 'text-[var(--color-brand-accent)]' : 'text-red-400'}`}>
+                            {isWorking ? 'Working' : 'Off'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setBarberWorkingHours(prev => ({
+                                ...prev,
+                                [day.index]: {
+                                  ...prev[day.index],
+                                  isWorking: !isWorking,
+                                }
+                              }))
+                            }}
+                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${
+                              isWorking ? 'bg-[var(--color-brand-accent)]' : 'bg-[var(--color-brand-700)]'
+                            }`}
+                          >
+                            <span
+                              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                isWorking ? 'translate-x-6' : 'translate-x-1'
+                              }`}
+                            />
+                          </button>
+                        </div>
+                      </div>
+
+                      {isWorking ? (
+                        <div className="flex items-center gap-2.5">
+                          <div className="flex-1">
+                            <label className="block text-[10px] font-bold text-[var(--color-brand-muted)] uppercase mb-1">Start Time</label>
+                            <input
+                              type="time"
+                              value={daySched.start_time}
+                              onChange={(e) => {
+                                const val = e.target.value
+                                setBarberWorkingHours(prev => ({
+                                  ...prev,
+                                  [day.index]: {
+                                    ...prev[day.index],
+                                    start_time: val
+                                  }
+                                }))
+                              }}
+                              className="w-full bg-[var(--color-brand-800)] text-white border border-[var(--color-brand-700)] rounded-lg p-2 text-xs sm:text-sm outline-none [color-scheme:dark] cursor-pointer"
+                            />
+                          </div>
+                          <span className="text-[var(--color-brand-muted)] pt-5 text-xs">to</span>
+                          <div className="flex-1">
+                            <label className="block text-[10px] font-bold text-[var(--color-brand-muted)] uppercase mb-1">End Time</label>
+                            <input
+                              type="time"
+                              value={daySched.end_time}
+                              onChange={(e) => {
+                                const val = e.target.value
+                                setBarberWorkingHours(prev => ({
+                                  ...prev,
+                                  [day.index]: {
+                                    ...prev[day.index],
+                                    end_time: val
+                                  }
+                                }))
+                              }}
+                              className="w-full bg-[var(--color-brand-800)] text-white border border-[var(--color-brand-700)] rounded-lg p-2 text-xs sm:text-sm outline-none [color-scheme:dark] cursor-pointer"
+                            />
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-xs text-[var(--color-brand-muted)] italic">
+                          Barber is unavailable for bookings on {day.name}s.
+                        </div>
+                      )}
+                    </div>
+                  )
+                })
+              )}
+            </div>
+
+            <div className="p-5 sm:p-6 border-t border-[var(--color-brand-700)] bg-[var(--color-brand-850)] flex items-center justify-between gap-3 flex-shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowManageDayModal(true)}
+                className="text-xs text-[var(--color-brand-accent)] hover:underline cursor-pointer font-bold"
+              >
+                Single Date Overrides →
+              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowBarberSettingsModal(false)}
+                  className="px-4 py-2.5 rounded-xl border border-[var(--color-brand-700)] text-xs font-bold hover:bg-[var(--color-brand-700)]/40 transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveWorkingHours}
+                  disabled={isSavingWorkingHours || loadingWorkingHours}
+                  className="px-5 py-2.5 rounded-xl bg-[var(--color-brand-accent)] text-white text-xs font-bold hover:brightness-110 transition-all cursor-pointer disabled:opacity-50 shadow-md"
+                >
+                  {isSavingWorkingHours ? 'Saving...' : 'Save Schedule'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* MANAGE DAY MODAL (Vagaro-Style Overrides & Blocking) */}
       {showManageDayModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
@@ -1294,7 +1614,7 @@ export default function AdminDashboard() {
     return (
       <div className="h-[100dvh] w-full bg-[var(--color-brand-900)] text-[var(--color-brand-light)] font-sans flex flex-col overflow-hidden relative">
         {/* Touch Drag Floating Preview (Visually Detached Chip Following Finger) */}
-        {touchPos && touchDraggedAppt && (
+        {touchPos && touchDraggedAppt && isTouchDragging && (
           <div
             className="fixed z-50 pointer-events-none -translate-x-1/2 -translate-y-full mb-3 px-3.5 py-2 rounded-xl bg-[var(--color-brand-800)] text-white text-xs font-bold shadow-[0_10px_30px_rgba(0,0,0,0.8)] border-2 border-[var(--color-brand-accent)] flex items-center gap-2.5 select-none"
             style={{ left: `${touchPos.x}px`, top: `${touchPos.y - 12}px`, touchAction: 'none' }}
@@ -1345,7 +1665,7 @@ export default function AdminDashboard() {
                 Today
               </button>
               <button
-                onClick={() => setShowManageDayModal(true)}
+                onClick={() => setShowBarberSettingsModal(true)}
                 className="flex items-center gap-1 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer"
               >
                 <SlidersHorizontal className="w-3.5 h-3.5 text-[var(--color-brand-muted)]" />

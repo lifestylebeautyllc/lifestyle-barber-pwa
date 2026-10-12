@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Calendar as CalendarIcon, Clock, Scissors, User, Phone, CheckCircle2, CalendarPlus, Zap, FileText } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
-import { getAvailableSlots } from '../../lib/slotEngine'
+import { getAvailableSlots, getDayOfWeekFromDateString, getBarberDaySchedule, timeToMinutes, minutesToTime, DAYS_OF_WEEK } from '../../lib/slotEngine'
 
 interface Service {
     id: string
@@ -146,6 +146,49 @@ export default function BarberCalendar() {
             const endMins = totalMinutes % 60
             const startTimeStr = `${selectedSlot.time}:00`
             const endTimeStr = `${endHours.toString().padStart(2, '0')}:${endMins.toString().padStart(2, '0')}:00`
+
+            // Enforce Barber Working Hours Availability
+            const { data: barberData } = await supabase
+                .from('barbers')
+                .select('working_hours')
+                .eq('id', selectedSlot.barberId)
+                .maybeSingle()
+
+            const dayOfWeek = getDayOfWeekFromDateString(selectedDate)
+            const daySchedule = getBarberDaySchedule(barberData?.working_hours, dayOfWeek)
+
+            const { data: override } = await supabase
+                .from('schedule_overrides')
+                .select('*')
+                .eq('barber_id', selectedSlot.barberId)
+                .eq('override_date', selectedDate)
+                .maybeSingle()
+
+            if (override?.is_off) {
+                alert("This barber is marked OFF on this date.")
+                setIsSubmitting(false)
+                return
+            }
+
+            const shiftStart = override?.start_time ? timeToMinutes(override.start_time) : daySchedule ? timeToMinutes(daySchedule.start_time) : null
+            const shiftEnd = override?.end_time ? timeToMinutes(override.end_time) : daySchedule ? timeToMinutes(daySchedule.end_time) : null
+            const isShiftWorking = override ? !override.is_off : daySchedule ? daySchedule.isWorking : true
+
+            if (!isShiftWorking) {
+                alert(`This barber is not scheduled to work on ${DAYS_OF_WEEK[dayOfWeek].name}s.`)
+                setIsSubmitting(false)
+                return
+            }
+
+            if (shiftStart !== null && shiftEnd !== null) {
+                const proposedStart = hours * 60 + minutes
+                const proposedEnd = totalMinutes
+                if (proposedStart < shiftStart || proposedEnd > shiftEnd) {
+                    alert(`Requested time is outside barber's working hours (${minutesToTime(shiftStart)} - ${minutesToTime(shiftEnd)}).`)
+                    setIsSubmitting(false)
+                    return
+                }
+            }
 
             // --- STEP B: Use the freshly returned client id — nothing cached, nothing hardcoded ---
             const { error: apptErr } = await supabase.from('appointments').insert({
