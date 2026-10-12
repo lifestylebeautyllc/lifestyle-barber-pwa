@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, UserX, Trash2, FileText } from 'lucide-react'
+import { useState, useEffect, useRef } from 'react'
+import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, UserX, Trash2, FileText, Clock } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { getAvailableSlots } from '../../lib/slotEngine'
 
@@ -100,6 +100,15 @@ export default function AdminDashboard() {
   const [monthOverrides, setMonthOverrides] = useState<any[]>([])
   const [weekAppointments, setWeekAppointments] = useState<any[]>([])
   const [weekOverrides, setWeekOverrides] = useState<any[]>([])
+
+  // Drag and Drop Rescheduling State
+  const [draggedAppt, setDraggedAppt] = useState<any>(null)
+  const [dragOverTarget, setDragOverTarget] = useState<{ date: string, time: string } | null>(null)
+  const [isDragging, setIsDragging] = useState(false)
+  const [touchDragPos, setTouchDragPos] = useState<{ x: number, y: number } | null>(null)
+  const [isRescheduling, setIsRescheduling] = useState(false)
+  const touchRef = useRef<{ startX: number, startY: number, appt: any, moved: boolean } | null>(null)
+  const justDraggedRef = useRef(false)
 
   // --- MODALS STATE ---
   const [showBookModal, setShowBookModal] = useState(false)
@@ -385,25 +394,15 @@ export default function AdminDashboard() {
       if (conflictErr) throw conflictErr
 
       if (conflicts) {
-        // 1. Proposed start lands inside an existing appointment
-        const startsInside = conflicts.find((c: any) => {
+        // Universal Overlap Formula: (proposedStartTime < existingAppt.end_time) && (proposedEndTime > existingAppt.start_time)
+        const conflict = conflicts.find((c: any) => {
           const cStart = toMinutes(c.start_time)
           const cEnd = toMinutes(c.end_time)
-          return proposedStartTime >= cStart && proposedStartTime < cEnd
+          return (proposedStartTime < cEnd) && (proposedEndTime > cStart)
         })
-        if (startsInside) {
-          const conflictName = (startsInside as any).clients?.name || 'Walk-In'
-          alert(`Hold up — ${conflictName} is already locked in at this time. Clear or shift that slot first before blocking it out.`)
-          return
-        }
-
-        // 2. Proposed duration block bleeds into a later appointment's start time
-        const bleedsIntoNext = conflicts.some((c: any) => {
-          const cStart = toMinutes(c.start_time)
-          return proposedStartTime < cStart && proposedEndTime > cStart
-        })
-        if (bleedsIntoNext) {
-          alert('Not enough time! This blocks runs into an existing appointment.')
+        if (conflict) {
+          const conflictName = (conflict as any).clients?.name || 'Walk-In'
+          alert(`Not enough time! Slot overlaps with existing booking (${conflictName} at ${formatTime(conflict.start_time)}).`)
           return
         }
       }
@@ -467,6 +466,92 @@ export default function AdminDashboard() {
       setShowBookModal(false); setBookService(null); setBookTime(''); setClientName(''); setClientPhone(''); setRefreshTrigger(prev => prev + 1)
     } catch (error: any) { console.error(error); alert(`Failed to book appointment: ${error?.message || 'Unknown error'}`) }
     finally { setIsBooking(false) }
+  }
+
+  // --- DRAG-AND-DROP RESCHEDULING HANDLER ---
+  const handleDropReschedule = async (apptToMove: any, newDate: string, newStartTime: string) => {
+    if (!apptToMove || !newDate || !newStartTime || isRescheduling) return
+
+    // A. Calculate the new start_time and appointment_date based on where it landed
+    const newStartMins = toMinutes(newStartTime)
+    const apptStartMins = toMinutes(apptToMove.start_time)
+    const apptEndMins = toMinutes(apptToMove.end_time)
+
+    // B. Calculate the proposedEndTime using the appointment's existing duration
+    const duration = Math.max(15, apptEndMins - apptStartMins)
+    const newEndMins = newStartMins + duration
+
+    // If dropped back at the same position, do nothing
+    if (apptToMove.appointment_date === newDate && apptStartMins === newStartMins) {
+      return
+    }
+
+    const endHour = Math.floor(newEndMins / 60).toString().padStart(2, '0')
+    const endMinute = (newEndMins % 60).toString().padStart(2, '0')
+    const newEndTimeStr = `${endHour}:${endMinute}:00`
+    const newStartTimeStr = `${newStartTime.slice(0, 5)}:00`
+
+    const targetBarberId = apptToMove.barber_id || selectedBarberId
+    setIsRescheduling(true)
+
+    try {
+      // Check if barber is marked OFF on newDate
+      const { data: overrideData } = await supabase
+        .from('schedule_overrides')
+        .select('is_off')
+        .eq('barber_id', targetBarberId)
+        .eq('override_date', newDate)
+        .maybeSingle()
+
+      if (overrideData?.is_off) {
+        alert("Cannot reschedule: Barber is marked OFF on this date.")
+        return
+      }
+
+      // C. Run strict universal collision math against the new time slot
+      const { data: conflicts, error: conflictErr } = await supabase
+        .from('appointments')
+        .select('id, clients ( name ), start_time, end_time')
+        .eq('barber_id', targetBarberId)
+        .eq('appointment_date', newDate)
+        .neq('status', 'cancelled')
+
+      if (conflictErr) throw conflictErr
+
+      if (conflicts) {
+        const hasCollision = conflicts.some((c: any) => {
+          if (c.id === apptToMove.id) return false // Ignore itself
+          const cStart = toMinutes(c.start_time)
+          const cEnd = toMinutes(c.end_time)
+          return (newStartMins < cEnd) && (newEndMins > cStart)
+        })
+
+        // D. If it collides, snap the appointment back to its original spot and throw an alert
+        if (hasCollision) {
+          alert("Not enough time! Slot overlaps with existing booking.")
+          return
+        }
+      }
+
+      // E. If clear, immediately run supabase update and refresh the calendar
+      const { error: updateErr } = await supabase
+        .from('appointments')
+        .update({
+          appointment_date: newDate,
+          start_time: newStartTimeStr,
+          end_time: newEndTimeStr
+        })
+        .eq('id', apptToMove.id)
+
+      if (updateErr) throw updateErr
+
+      setRefreshTrigger(prev => prev + 1)
+    } catch (err: any) {
+      console.error("Failed to reschedule:", err)
+      alert(`Failed to reschedule appointment: ${err?.message || 'Unknown error'}`)
+    } finally {
+      setIsRescheduling(false)
+    }
   }
 
   const handleExpressWalkIn = async (time: string, targetBarberId: string) => {
@@ -741,6 +826,23 @@ export default function AdminDashboard() {
 
     return (
       <div
+        data-day-column="true"
+        data-date={gridDate}
+        onDragOver={(e) => {
+          e.preventDefault()
+          e.dataTransfer.dropEffect = 'move'
+        }}
+        onDrop={(e) => {
+          e.preventDefault()
+          if (!draggedAppt) return
+          const rect = e.currentTarget.getBoundingClientRect()
+          const relativeY = e.clientY - rect.top
+          const slotIndex = Math.floor(Math.max(0, Math.min(TOTAL_RAIL_HEIGHT - 1, relativeY)) / SLOT_HEIGHT)
+          const totalMins = CALENDAR_START_HOUR * 60 + (slotIndex * 15)
+          const slotTime = `${Math.floor(totalMins / 60).toString().padStart(2, '0')}:${(totalMins % 60).toString().padStart(2, '0')}`
+          setDragOverTarget(null)
+          handleDropReschedule(draggedAppt, gridDate, slotTime)
+        }}
         className={`relative flex-1 w-full ${isWeekView ? 'border-r border-[var(--color-brand-700)]/60 min-w-0' : 'w-full'}`}
         style={{
           height: `${TOTAL_RAIL_HEIGHT}px`,
@@ -765,26 +867,61 @@ export default function AdminDashboard() {
         {Array.from({ length: TOTAL_HOURS * 4 }).map((_, i) => {
           const totalMins = CALENDAR_START_HOUR * 60 + (i * 15)
           const timeStr = `${Math.floor(totalMins / 60).toString().padStart(2, '0')}:${(totalMins % 60).toString().padStart(2, '0')}`
+          const isSlotHovered = dragOverTarget?.date === gridDate && dragOverTarget?.time === timeStr
+
           return (
             <button
               key={`slot-${i}`}
+              data-slot="true"
+              data-date={gridDate}
+              data-time={timeStr}
+              onDragOver={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                e.dataTransfer.dropEffect = 'move'
+                if (dragOverTarget?.date !== gridDate || dragOverTarget?.time !== timeStr) {
+                  setDragOverTarget({ date: gridDate, time: timeStr })
+                }
+              }}
+              onDragLeave={() => {
+                if (dragOverTarget?.date === gridDate && dragOverTarget?.time === timeStr) {
+                  setDragOverTarget(null)
+                }
+              }}
+              onDrop={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                setDragOverTarget(null)
+                if (draggedAppt) {
+                  handleDropReschedule(draggedAppt, gridDate, timeStr)
+                }
+              }}
               onClick={() => {
+                if (isDragging || justDraggedRef.current) return
                 setBookDate(gridDate)
                 setBookTime(timeStr)
                 if (!bookService && adminServices.length > 0) setBookService(adminServices[0])
                 setShowBookModal(true)
               }}
-              title={`Book ${formatTime(timeStr)}`}
+              title={isSlotHovered ? `Drop to reschedule to ${formatTime(timeStr)}` : `Book ${formatTime(timeStr)}`}
               className={`absolute left-0 w-full m-0 p-0 border-0 outline-none transition-colors z-10 ${
                 isOff
                   ? 'pointer-events-none opacity-0'
+                  : isSlotHovered
+                  ? 'bg-[var(--color-brand-accent)]/35 ring-1 ring-inset ring-[var(--color-brand-accent)] cursor-copy'
                   : 'cursor-pointer hover:bg-[var(--color-brand-accent)]/15 active:bg-[var(--color-brand-accent)]/25'
               }`}
               style={{
                 top: `${i * SLOT_HEIGHT}px`,
                 height: `${SLOT_HEIGHT}px`,
               }}
-            />
+            >
+              {isSlotHovered && draggedAppt && (
+                <div className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white pointer-events-none bg-[var(--color-brand-accent)]/30 truncate px-1">
+                  Reschedule: {formatTime(timeStr)}
+                </div>
+              )}
+            </button>
           )
         })}
 
@@ -807,6 +944,7 @@ export default function AdminDashboard() {
 
           const isBlocked = appt.status === 'blocked'
           const isCompleted = appt.status === 'completed'
+          const isThisBeingDragged = draggedAppt?.id === appt.id
 
           const colorClasses = isBlocked
             ? 'bg-orange-950/90 border-orange-500/80 text-orange-200'
@@ -814,12 +952,101 @@ export default function AdminDashboard() {
             ? 'bg-emerald-950/90 border-emerald-500/80 text-emerald-200'
             : 'bg-[var(--color-brand-800)] border-[var(--color-brand-accent)] text-white shadow-md'
 
+          const dragHandlers = {
+            draggable: true,
+            onDragStart: (e: React.DragEvent) => {
+              e.dataTransfer.setData('text/plain', appt.id)
+              e.dataTransfer.effectAllowed = 'move'
+              setDraggedAppt(appt)
+              setIsDragging(true)
+            },
+            onDragEnd: () => {
+              setDraggedAppt(null)
+              setIsDragging(false)
+              setDragOverTarget(null)
+            },
+            onTouchStart: (e: React.TouchEvent) => {
+              const touch = e.touches[0]
+              touchRef.current = { startX: touch.clientX, startY: touch.clientY, appt, moved: false }
+            },
+            onTouchMove: (e: React.TouchEvent) => {
+              if (!touchRef.current) return
+              const touch = e.touches[0]
+              const dx = touch.clientX - touchRef.current.startX
+              const dy = touch.clientY - touchRef.current.startY
+              if (!touchRef.current.moved && Math.hypot(dx, dy) > 8) {
+                touchRef.current.moved = true
+                setIsDragging(true)
+                setDraggedAppt(touchRef.current.appt)
+              }
+              if (touchRef.current.moved) {
+                if (e.cancelable) e.preventDefault()
+                setTouchDragPos({ x: touch.clientX, y: touch.clientY })
+                const elem = document.elementFromPoint(touch.clientX, touch.clientY)
+                const colElem = elem?.closest('[data-day-column="true"]') as HTMLElement | null
+                if (colElem) {
+                  const colDate = colElem.dataset.date
+                  const rect = colElem.getBoundingClientRect()
+                  const relativeY = touch.clientY - rect.top
+                  const slotIndex = Math.floor(Math.max(0, Math.min(TOTAL_RAIL_HEIGHT - 1, relativeY)) / SLOT_HEIGHT)
+                  const totalMins = CALENDAR_START_HOUR * 60 + (slotIndex * 15)
+                  const slotTime = `${Math.floor(totalMins / 60).toString().padStart(2, '0')}:${(totalMins % 60).toString().padStart(2, '0')}`
+                  if (colDate) setDragOverTarget({ date: colDate, time: slotTime })
+                } else {
+                  setDragOverTarget(null)
+                }
+              }
+            },
+            onTouchEnd: (e: React.TouchEvent) => {
+              if (touchRef.current?.moved && touchRef.current.appt) {
+                justDraggedRef.current = true
+                setTimeout(() => { justDraggedRef.current = false }, 350)
+                const apptToMove = touchRef.current.appt
+                const touch = e.changedTouches[0]
+                const elem = document.elementFromPoint(touch.clientX, touch.clientY)
+                const colElem = elem?.closest('[data-day-column="true"]') as HTMLElement | null
+                if (colElem) {
+                  const colDate = colElem.dataset.date
+                  const rect = colElem.getBoundingClientRect()
+                  const relativeY = touch.clientY - rect.top
+                  const slotIndex = Math.floor(Math.max(0, Math.min(TOTAL_RAIL_HEIGHT - 1, relativeY)) / SLOT_HEIGHT)
+                  const totalMins = CALENDAR_START_HOUR * 60 + (slotIndex * 15)
+                  const slotTime = `${Math.floor(totalMins / 60).toString().padStart(2, '0')}:${(totalMins % 60).toString().padStart(2, '0')}`
+                  if (colDate) {
+                    handleDropReschedule(apptToMove, colDate, slotTime)
+                  }
+                }
+              } else if (!touchRef.current?.moved && touchRef.current?.appt) {
+                handleOpenAppt(touchRef.current.appt)
+              }
+              touchRef.current = null
+              setIsDragging(false)
+              setDraggedAppt(null)
+              setTouchDragPos(null)
+              setDragOverTarget(null)
+            },
+            onTouchCancel: () => {
+              touchRef.current = null
+              setIsDragging(false)
+              setDraggedAppt(null)
+              setTouchDragPos(null)
+              setDragOverTarget(null)
+            }
+          }
+
           if (isWeekView) {
             return (
               <button
                 key={appt.id}
-                onClick={(e) => { e.stopPropagation(); handleOpenAppt(appt); }}
-                className={`absolute left-px right-px m-0 box-border rounded-sm p-0.5 sm:p-1 overflow-hidden border shadow-sm flex flex-col text-left z-20 cursor-pointer hover:brightness-125 transition-all ${colorClasses}`}
+                {...dragHandlers}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  if (isDragging || justDraggedRef.current) return
+                  handleOpenAppt(appt)
+                }}
+                className={`absolute left-px right-px m-0 box-border rounded-sm p-0.5 sm:p-1 overflow-hidden border shadow-sm flex flex-col text-left z-20 cursor-grab active:cursor-grabbing hover:brightness-125 transition-all touch-none select-none ${
+                  isThisBeingDragged ? 'opacity-40 ring-2 ring-[var(--color-brand-accent)]' : ''
+                } ${colorClasses}`}
                 style={{ top: `${top}px`, height: `${height}px` }}
               >
                 <div className="text-[9px] sm:text-[10px] font-bold leading-tight truncate overflow-hidden whitespace-nowrap w-full">
@@ -837,8 +1064,14 @@ export default function AdminDashboard() {
           return (
             <button
               key={appt.id}
-              onClick={() => handleOpenAppt(appt)}
-              className={`absolute left-1.5 right-1.5 m-0 box-border rounded-lg p-2 overflow-hidden border shadow-md flex flex-col text-left z-20 cursor-pointer hover:brightness-110 transition-all ${colorClasses}`}
+              {...dragHandlers}
+              onClick={() => {
+                if (isDragging || justDraggedRef.current) return
+                handleOpenAppt(appt)
+              }}
+              className={`absolute left-1.5 right-1.5 m-0 box-border rounded-lg p-2 overflow-hidden border shadow-md flex flex-col text-left z-20 cursor-grab active:cursor-grabbing hover:brightness-110 transition-all touch-none select-none ${
+                isThisBeingDragged ? 'opacity-40 ring-2 ring-[var(--color-brand-accent)]' : ''
+              } ${colorClasses}`}
               style={{ top: `${top}px`, height: `${height}px` }}
             >
               {height <= 25 ? (
@@ -1075,6 +1308,22 @@ export default function AdminDashboard() {
 
     return (
       <div className="h-[100dvh] w-full bg-[var(--color-brand-900)] text-[var(--color-brand-light)] font-sans flex flex-col overflow-hidden relative">
+        {/* Touch Drag Floating Preview */}
+        {touchDragPos && draggedAppt && (
+          <div
+            className="fixed z-50 pointer-events-none -translate-x-1/2 -translate-y-full mb-3 px-3 py-1.5 rounded-xl bg-[var(--color-brand-accent)] text-white text-xs font-bold shadow-2xl border border-white/30 flex items-center gap-2 select-none"
+            style={{ left: `${touchDragPos.x}px`, top: `${touchDragPos.y - 12}px` }}
+          >
+            <Clock className="w-3.5 h-3.5 flex-shrink-0" />
+            <div className="flex flex-col">
+              <span className="truncate max-w-[150px]">{draggedAppt.clients?.name || 'Appointment'}</span>
+              <span className="text-[10px] opacity-90">
+                {dragOverTarget ? `${formatTime(dragOverTarget.time)} (${dragOverTarget.date})` : 'Drop to reschedule'}
+              </span>
+            </div>
+          </div>
+        )}
+
         {/* COMPACT STICKY HEADER */}
         <header className="sticky top-0 z-40 bg-[var(--color-brand-900)]/95 backdrop-blur-md border-b border-[var(--color-brand-700)] select-none flex-shrink-0">
           {/* Top Bar: Nav, Barber Selector, Quick Actions */}
