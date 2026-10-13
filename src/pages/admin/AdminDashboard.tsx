@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, UserX, Trash2, FileText, Clock } from 'lucide-react'
+import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, UserX, Trash2, FileText, Clock, Ban } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { getAvailableSlots, getDayOfWeekFromDateString, getBarberDaySchedule, minutesToTime, DAYS_OF_WEEK, DEFAULT_WORKING_HOURS, type DaySchedule } from '../../lib/slotEngine'
 
@@ -115,6 +115,8 @@ export default function AdminDashboard() {
 
   // --- MODALS STATE ---
   const [showBookModal, setShowBookModal] = useState(false)
+  const [isBlockoutMode, setIsBlockoutMode] = useState(false)
+  const [blockEndTime, setBlockEndTime] = useState('')
   const [bookService, setBookService] = useState<any>(null)
   const [bookDate, setBookDate] = useState(selectedDate)
   const [bookTime, setBookTime] = useState('')
@@ -252,7 +254,7 @@ export default function AdminDashboard() {
       setLoadingAppts(true)
       const [apptRes, overrideRes] = await Promise.all([
         supabase.from('appointments')
-          .select(`id, barber_id, appointment_date, start_time, end_time, status, notes, clients ( id, name, phone, notes )`)
+          .select(`id, barber_id, appointment_date, start_time, end_time, status, notes, is_blockout, clients ( id, name, phone, notes )`)
           .eq('appointment_date', selectedDate)
           .eq('barber_id', selectedBarberId)
           .neq('status', 'cancelled')
@@ -288,7 +290,7 @@ export default function AdminDashboard() {
 
       const [apptRes, overrideRes] = await Promise.all([
         supabase.from('appointments')
-          .select('id, barber_id, appointment_date, start_time, end_time, status, clients ( name )')
+          .select('id, barber_id, appointment_date, start_time, end_time, status, is_blockout, notes, clients ( name )')
           .eq('barber_id', selectedBarberId)
           .gte('appointment_date', startOfMonth)
           .lte('appointment_date', endOfMonth)
@@ -315,7 +317,7 @@ export default function AdminDashboard() {
       const endOfWeek = `${endOfWeekDate.getFullYear()}-${String(endOfWeekDate.getMonth() + 1).padStart(2, '0')}-${String(endOfWeekDate.getDate()).padStart(2, '0')}`
 
       const [apptRes, overrideRes] = await Promise.all([
-        supabase.from('appointments').select('id, barber_id, appointment_date, start_time, end_time, status, notes, clients ( id, name, phone, notes )').eq('barber_id', selectedBarberId).gte('appointment_date', startOfWeek).lte('appointment_date', endOfWeek).neq('status', 'cancelled').order('start_time', { ascending: true }),
+        supabase.from('appointments').select('id, barber_id, appointment_date, start_time, end_time, status, notes, is_blockout, clients ( id, name, phone, notes )').eq('barber_id', selectedBarberId).gte('appointment_date', startOfWeek).lte('appointment_date', endOfWeek).neq('status', 'cancelled').order('start_time', { ascending: true }),
         supabase.from('schedule_overrides').select('override_date, is_off').eq('barber_id', selectedBarberId).gte('override_date', startOfWeek).lte('override_date', endOfWeek)
       ])
       setWeekAppointments(apptRes.data || [])
@@ -444,14 +446,33 @@ export default function AdminDashboard() {
   // --- SUBMIT HANDLERS ---
   const handleAdminBooking = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!clientName || !clientPhone || !bookTime || !bookService) return
+    if (isBlockoutMode) {
+      if (!bookDate || !bookTime || !blockEndTime) return
+    } else {
+      if (!clientName || !clientPhone || !bookTime || !bookService) return
+    }
     setIsBooking(true)
     try {
       // --- DURATION-BASED COLLISION MATH (runs before any client writes) ---
-      const duration = Number(bookService.duration_minutes) || 0
-      const proposedStartTime = toMinutes(bookTime)
-      const proposedEndTime = proposedStartTime + duration
-      const endTimeStr = `${Math.floor(proposedEndTime / 60).toString().padStart(2, '0')}:${(proposedEndTime % 60).toString().padStart(2, '0')}:00`
+      let proposedStartTime: number
+      let proposedEndTime: number
+      let endTimeStr: string
+
+      if (isBlockoutMode) {
+        proposedStartTime = toMinutes(bookTime)
+        proposedEndTime = toMinutes(blockEndTime)
+        if (proposedEndTime <= proposedStartTime) {
+          alert("End time must be after start time.")
+          setIsBooking(false)
+          return
+        }
+        endTimeStr = `${Math.floor(proposedEndTime / 60).toString().padStart(2, '0')}:${(proposedEndTime % 60).toString().padStart(2, '0')}:00`
+      } else {
+        const duration = Number(bookService.duration_minutes) || 0
+        proposedStartTime = toMinutes(bookTime)
+        proposedEndTime = proposedStartTime + duration
+        endTimeStr = `${Math.floor(proposedEndTime / 60).toString().padStart(2, '0')}:${(proposedEndTime % 60).toString().padStart(2, '0')}:00`
+      }
 
       // 1. Enforce Barber Working Hours Availability
       const targetBarber = barbers.find(b => b.id === selectedBarberId)
@@ -473,7 +494,7 @@ export default function AdminDashboard() {
         .maybeSingle()
 
       if (overrideData?.is_off) {
-        alert("Cannot book: Barber is marked OFF on this date.")
+        alert(`Cannot ${isBlockoutMode ? 'block time' : 'book'}: Barber is marked OFF on this date.`)
         return
       }
 
@@ -482,20 +503,20 @@ export default function AdminDashboard() {
       const isShiftWorking = overrideData ? !overrideData.is_off : daySchedule ? daySchedule.isWorking : true
 
       if (!isShiftWorking) {
-        alert(`Cannot book: Barber is not scheduled to work on ${DAYS_OF_WEEK[dayOfWeek].name}s.`)
+        alert(`Cannot ${isBlockoutMode ? 'block time' : 'book'}: Barber is not scheduled to work on ${DAYS_OF_WEEK[dayOfWeek].name}s.`)
         return
       }
 
       if (shiftStart !== null && shiftEnd !== null) {
         if (proposedStartTime < shiftStart || proposedEndTime > shiftEnd) {
-          alert(`Cannot book: Proposed appointment time (${formatTime(bookTime)} - ${formatTime(endTimeStr)}) falls outside barber's working hours (${minutesToTime(shiftStart)} - ${minutesToTime(shiftEnd)}).`)
+          alert(`Cannot ${isBlockoutMode ? 'block time' : 'book'}: Proposed slot (${formatTime(bookTime)} - ${formatTime(endTimeStr)}) falls outside barber's working hours (${minutesToTime(shiftStart)} - ${minutesToTime(shiftEnd)}).`)
           return
         }
       }
 
       const { data: conflicts, error: conflictErr } = await supabase
         .from('appointments')
-        .select('clients ( name ), start_time, end_time')
+        .select('clients ( name ), start_time, end_time, is_blockout')
         .eq('barber_id', selectedBarberId)
         .eq('appointment_date', bookDate)
         .neq('status', 'cancelled')
@@ -509,72 +530,100 @@ export default function AdminDashboard() {
           return (proposedStartTime < cEnd) && (proposedEndTime > cStart)
         })
         if (conflict) {
-          const conflictName = (conflict as any).clients?.name || 'Walk-In'
+          const conflictName = (conflict as any).is_blockout ? 'Blocked Time' : (conflict as any).clients?.name || 'Walk-In'
           alert(`Not enough time! Slot overlaps with existing booking (${conflictName} at ${formatTime(conflict.start_time)}).`)
           return
         }
       }
 
-      // --- STEP A: Write the LIVE form state into `clients` and get its real id back ---
-      // `clients.phone` is UNIQUE, so a plain insert would 409 for a returning client.
-      // Upsert on phone inserts new clients and overwrites the name on existing ones — never a stale name.
-      const liveName = clientName.trim()
-      const livePhone = clientPhone.trim()
-      const { data: clientData, error: clientErr } = await supabase
-        .from('clients')
-        .upsert({ name: liveName, phone: livePhone }, { onConflict: 'phone' })
-        .select('id, name')
-        .single()
-      if (clientErr) throw clientErr
-      if (!clientData?.id) throw new Error('Client record was not returned by the database.')
-      if (clientData.name !== liveName) throw new Error(`Client name did not save (database still has "${clientData.name}").`)
-
-      // --- STEP B: Use the freshly returned client id — nothing cached, nothing hardcoded ---
-      // Only real `appointments` columns. Client name/phone live on `clients` (linked via client_id).
-      // end_time + appointment_date are NOT NULL in the schema and must be sent.
-      const { error: apptErr } = await supabase.from('appointments').insert({
-        barber_id: selectedBarberId,
-        client_id: clientData.id,
-        service_id: bookService.id,
-        appointment_date: bookDate,
-        start_time: `${bookTime}:00`,
-        end_time: endTimeStr,
-        status: 'booked',
-        notes: bookNotes.trim() || null
-      })
-      if (apptErr) throw apptErr
-
-      // Dispatch Twilio SMS Notifications
-      try {
-        const assignedBarber = barbers.find(b => b.id === selectedBarberId)
-        const barberName = assignedBarber?.name || loggedInBarber?.name || 'LifeStyle Barber'
-        const friendlyDate = new Date(bookDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
-
-        // 1. Notify Client
-        await supabase.functions.invoke('twilio-sms', {
-          body: {
-            to: clientPhone,
-            message: `LifeStyle Barber: Your appointment with ${barberName} for ${bookService.name} is confirmed for ${friendlyDate} at ${formatTime(bookTime)}. Reply CANCEL to cancel. Reply STOP to unsubscribe.`
-          }
-        })
-
-        // 2. Notify Barber (if phone available)
-        const barberPhone = assignedBarber?.phone || loggedInBarber?.phone
-        if (barberPhone && barberPhone !== clientPhone) {
-          await supabase.functions.invoke('twilio-sms', {
-            body: {
-              to: barberPhone,
-              message: `LifeStyle Barber: New booking with ${clientName} (${clientPhone}) for ${bookService.name} on ${friendlyDate} at ${formatTime(bookTime)}.`
-            }
-          })
+      // --- STEP A: Resolve or Create Client ---
+      let clientId: string | null = null
+      if (isBlockoutMode) {
+        // Look up or insert fallback 'Blocked' client
+        let { data: blockClient } = await supabase.from('clients').select('id').eq('phone', "0000000000").maybeSingle()
+        clientId = blockClient?.id
+        if (!clientId) {
+          const { data: newClient } = await supabase.from('clients').insert({ name: 'Blocked', phone: "0000000000" }).select().single()
+          clientId = newClient?.id
         }
-      } catch (smsErr) {
-        console.error("SMS Dispatch Failed:", smsErr)
+      } else {
+        const liveName = clientName.trim()
+        const livePhone = clientPhone.trim()
+        const { data: clientData, error: clientErr } = await supabase
+          .from('clients')
+          .upsert({ name: liveName, phone: livePhone }, { onConflict: 'phone' })
+          .select('id, name')
+          .single()
+        if (clientErr) throw clientErr
+        if (!clientData?.id) throw new Error('Client record was not returned by the database.')
+        clientId = clientData.id
       }
 
-      setShowBookModal(false); setBookService(null); setBookTime(''); setClientName(''); setClientPhone(''); setBookNotes(''); setRefreshTrigger(prev => prev + 1)
-    } catch (error: any) { console.error(error); alert(`Failed to book appointment: ${error?.message || 'Unknown error'}`) }
-    finally { setIsBooking(false) }
+      // --- STEP B: Insert into appointments with is_blockout ---
+      const insertPayload: any = {
+        barber_id: selectedBarberId,
+        client_id: clientId,
+        appointment_date: bookDate,
+        start_time: `${bookTime.slice(0, 5)}:00`,
+        end_time: endTimeStr,
+        status: isBlockoutMode ? 'blocked' : 'booked',
+        notes: bookNotes.trim() || (isBlockoutMode ? 'Blocked Time' : null),
+        is_blockout: isBlockoutMode
+      }
+      if (!isBlockoutMode && bookService?.id) {
+        insertPayload.service_id = bookService.id
+      } else if (bookService?.id) {
+        insertPayload.service_id = bookService.id
+      }
+
+      const { error: apptErr } = await supabase.from('appointments').insert(insertPayload)
+      if (apptErr) throw apptErr
+
+      // Dispatch Twilio SMS Notifications (only for real client bookings)
+      if (!isBlockoutMode) {
+        try {
+          const assignedBarber = barbers.find(b => b.id === selectedBarberId)
+          const barberName = assignedBarber?.name || loggedInBarber?.name || 'LifeStyle Barber'
+          const friendlyDate = new Date(bookDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+
+          // 1. Notify Client
+          await supabase.functions.invoke('twilio-sms', {
+            body: {
+              to: clientPhone,
+              message: `LifeStyle Barber: Your appointment with ${barberName} for ${bookService.name} is confirmed for ${friendlyDate} at ${formatTime(bookTime)}. Reply CANCEL to cancel. Reply STOP to unsubscribe.`
+            }
+          })
+
+          // 2. Notify Barber (if phone available)
+          const barberPhone = assignedBarber?.phone || loggedInBarber?.phone
+          if (barberPhone && barberPhone !== clientPhone) {
+            await supabase.functions.invoke('twilio-sms', {
+              body: {
+                to: barberPhone,
+                message: `LifeStyle Barber: New booking with ${clientName} (${clientPhone}) for ${bookService.name} on ${friendlyDate} at ${formatTime(bookTime)}.`
+              }
+            })
+          }
+        } catch (smsErr) {
+          console.error("SMS Dispatch Failed:", smsErr)
+        }
+      }
+
+      setShowBookModal(false)
+      setIsBlockoutMode(false)
+      setBookService(null)
+      setBookTime('')
+      setBlockEndTime('')
+      setClientName('')
+      setClientPhone('')
+      setBookNotes('')
+      setRefreshTrigger(prev => prev + 1)
+    } catch (error: any) {
+      console.error(error)
+      alert(`Failed to ${isBlockoutMode ? 'block time' : 'book appointment'}: ${error?.message || 'Unknown error'}`)
+    } finally {
+      setIsBooking(false)
+    }
   }
 
   // --- DRAG-AND-DROP RESCHEDULING HANDLER ---
@@ -1282,6 +1331,7 @@ export default function AdminDashboard() {
                 if (touchDraggedAppt || justDraggedRef.current) return
                 setBookDate(gridDate)
                 setBookTime(timeStr)
+                setBlockEndTime(minutesToTime(toMinutes(timeStr) + 60))
                 if (!bookService && adminServices.length > 0) setBookService(adminServices[0])
                 setShowBookModal(true)
               }}
@@ -1324,11 +1374,14 @@ export default function AdminDashboard() {
           const durationMins = Math.max(15, toMinutes(appt.end_time) - toMinutes(appt.start_time))
           const height = durationMins * PIXELS_PER_MINUTE
 
-          const isBlocked = appt.status === 'blocked'
+          const isBlockout = Boolean(appt.is_blockout)
+          const isBlocked = appt.status === 'blocked' || isBlockout
           const isCompleted = appt.status === 'completed'
           const isThisBeingDragged = touchDraggedAppt?.id === appt.id
 
-          const colorClasses = isBlocked
+          const colorClasses = isBlockout
+            ? 'bg-zinc-800 border-zinc-600 text-zinc-300'
+            : isBlocked
             ? 'bg-orange-950/90 border-orange-500/80 text-orange-200'
             : isCompleted
             ? 'bg-emerald-950/90 border-emerald-500/80 text-emerald-200'
@@ -1360,11 +1413,11 @@ export default function AdminDashboard() {
                 }}
               >
                 <div className="text-[9px] sm:text-[10px] font-bold leading-tight truncate overflow-hidden whitespace-nowrap w-full pointer-events-none">
-                  {formatTime(appt.start_time).replace(':00', '')} {isBlocked ? 'BLOCKED' : appt.clients?.name || 'Walk-In'}
+                  {formatTime(appt.start_time).replace(':00', '')} {isBlockout ? (appt.notes || 'Blocked') : isBlocked ? 'BLOCKED' : appt.clients?.name || 'Walk-In'}
                 </div>
                 {height >= 35 && (
                   <div className="text-[8px] sm:text-[9px] opacity-75 truncate overflow-hidden whitespace-nowrap leading-none mt-0.5 w-full pointer-events-none">
-                    {isBlocked ? 'Blocked' : formatTime(appt.end_time).replace(':00', '')}
+                    {isBlockout ? formatTime(appt.end_time).replace(':00', '') : isBlocked ? 'Blocked' : formatTime(appt.end_time).replace(':00', '')}
                   </div>
                 )}
               </button>
@@ -1398,8 +1451,8 @@ export default function AdminDashboard() {
               {height <= 25 ? (
                 <div className="flex items-center justify-between text-xs font-bold leading-none pointer-events-none">
                   <span className="truncate flex items-center gap-1">
-                    {isBlocked && <Lock className="w-3 h-3 flex-shrink-0 text-orange-400" />}
-                    {isBlocked ? 'BLOCKED TIME' : appt.clients?.name || 'Walk-In'}
+                    {isBlockout ? <Ban className="w-3 h-3 flex-shrink-0 text-zinc-400" /> : isBlocked && <Lock className="w-3 h-3 flex-shrink-0 text-orange-400" />}
+                    {isBlockout ? (appt.notes || 'Blocked Time') : isBlocked ? 'BLOCKED TIME' : appt.clients?.name || 'Walk-In'}
                   </span>
                   <span className="text-[10px] opacity-80 flex-shrink-0 ml-1">
                     {formatTime(appt.start_time)}
@@ -1408,18 +1461,18 @@ export default function AdminDashboard() {
               ) : (
                 <div className="pointer-events-none flex flex-col h-full">
                   <div className={`text-xs font-bold flex items-center justify-between ${
-                    isBlocked ? 'text-orange-400' : isCompleted ? 'text-emerald-400' : 'text-[var(--color-brand-accent)]'
+                    isBlockout ? 'text-zinc-400' : isBlocked ? 'text-orange-400' : isCompleted ? 'text-emerald-400' : 'text-[var(--color-brand-accent)]'
                   }`}>
                     <span className="flex items-center gap-1">
-                      {isBlocked && <Lock className="w-3 h-3 flex-shrink-0" />}
+                      {isBlockout ? <Ban className="w-3 h-3 flex-shrink-0" /> : isBlocked && <Lock className="w-3 h-3 flex-shrink-0" />}
                       {formatTime(appt.start_time)} - {formatTime(appt.end_time)}
                     </span>
-                    {appt.notes && <FileText className="w-3 h-3 flex-shrink-0 opacity-80" />}
+                    {appt.notes && !isBlockout && <FileText className="w-3 h-3 flex-shrink-0 opacity-80" />}
                   </div>
-                  <div className="text-xs truncate font-bold text-white mt-0.5">
-                    {isBlocked ? 'BLOCKED TIME' : appt.clients?.name || 'Walk-In'}
+                  <div className={`text-xs truncate font-bold mt-0.5 ${isBlockout ? 'text-zinc-200' : 'text-white'}`}>
+                    {isBlockout ? (appt.notes || 'Blocked Time') : isBlocked ? 'BLOCKED TIME' : appt.clients?.name || 'Walk-In'}
                   </div>
-                  {height >= 55 && appt.clients?.phone && appt.clients?.phone !== '0000000000' && (
+                  {height >= 55 && !isBlockout && appt.clients?.phone && appt.clients?.phone !== '0000000000' && (
                     <div className="text-[10px] text-[var(--color-brand-muted)] font-mono mt-auto truncate">
                       {appt.clients.phone}
                     </div>
@@ -1442,7 +1495,9 @@ export default function AdminDashboard() {
            <div className="bg-[var(--color-brand-800)] w-full max-w-md rounded-2xl flex flex-col border border-[var(--color-brand-700)] shadow-2xl overflow-hidden">
               <div className="flex items-center justify-between p-6 border-b border-[var(--color-brand-700)]">
                 <div>
-                  <h2 className="text-xl font-bold">{selectedAppt.clients?.name || 'Walk-In'}</h2>
+                  <h2 className="text-xl font-bold">
+                    {selectedAppt.is_blockout ? (selectedAppt.notes || 'Blocked Time') : selectedAppt.clients?.name || 'Walk-In'}
+                  </h2>
                   <p className="text-sm text-[var(--color-brand-accent)]">{formatTime(selectedAppt.start_time)} - {formatTime(selectedAppt.end_time)}</p>
                 </div>
                 <button onClick={() => setShowApptModal(false)} className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer"><X className="w-6 h-6" /></button>
@@ -1450,7 +1505,7 @@ export default function AdminDashboard() {
 
               <div className="p-6 space-y-6">
                  {/* Contact Buttons */}
-                 {selectedAppt.clients?.phone && selectedAppt.clients.phone !== '0000000000' && (
+                 {!selectedAppt.is_blockout && selectedAppt.clients?.phone && selectedAppt.clients.phone !== '0000000000' && (
                    <div className="flex gap-3">
                      <a href={`tel:${selectedAppt.clients.phone}`} className="flex-1 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-center py-3 rounded-xl font-bold hover:border-[var(--color-brand-accent)] transition-colors flex items-center justify-center gap-2 cursor-pointer">
                        <Phone className="w-4 h-4" /> Call
@@ -1461,51 +1516,59 @@ export default function AdminDashboard() {
                    </div>
                  )}
 
-                 {/* Appointment Booking Notes */}
+                 {/* Appointment Booking Notes / Reason */}
                  <div className="space-y-2">
-                   <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider">Client Notes</label>
+                   <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider">
+                     {selectedAppt.is_blockout ? 'Blockout Reason' : 'Client Notes'}
+                   </label>
                    {selectedAppt.notes ? (
                      <div className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-white text-sm rounded-xl p-3">
                        {selectedAppt.notes}
                      </div>
                    ) : (
                      <div className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-[var(--color-brand-muted)] text-sm rounded-xl p-3 italic">
-                       No special notes provided.
+                       {selectedAppt.is_blockout ? 'No reason specified.' : 'No special notes provided.'}
                      </div>
                    )}
                  </div>
 
-                 {/* Cut Notes */}
-                 <div className="space-y-2">
-                   <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider">Client Cut Notes</label>
-                   <textarea
-                     value={clientNotes}
-                     onChange={(e) => setClientNotes(e.target.value)}
-                     placeholder="e.g. #2 high fade, finger length on top..."
-                     className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-white rounded-xl p-3 h-28 outline-none focus:border-[var(--color-brand-accent)] resize-none"
-                   />
-                   <button
-                     onClick={handleSaveNotes}
-                     disabled={isUpdatingAppt || clientNotes === (selectedAppt.clients?.notes || '')}
-                     className="w-full bg-[var(--color-brand-700)] hover:bg-[var(--color-brand-600)] text-white font-bold py-3 rounded-lg transition-colors disabled:opacity-50 cursor-pointer"
-                   >
-                     Save Notes
-                   </button>
-                 </div>
+                 {/* Cut Notes (Clients only) */}
+                 {!selectedAppt.is_blockout && (
+                   <div className="space-y-2">
+                     <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider">Client Cut Notes</label>
+                     <textarea
+                       value={clientNotes}
+                       onChange={(e) => setClientNotes(e.target.value)}
+                       placeholder="e.g. #2 high fade, finger length on top..."
+                       className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-white rounded-xl p-3 h-28 outline-none focus:border-[var(--color-brand-accent)] resize-none"
+                     />
+                     <button
+                       onClick={handleSaveNotes}
+                       disabled={isUpdatingAppt || clientNotes === (selectedAppt.clients?.notes || '')}
+                       className="w-full bg-[var(--color-brand-700)] hover:bg-[var(--color-brand-600)] text-white font-bold py-3 rounded-lg transition-colors disabled:opacity-50 cursor-pointer"
+                     >
+                       Save Notes
+                     </button>
+                   </div>
+                 )}
 
                  <hr className="border-[var(--color-brand-700)]" />
 
-                 {/* Status Toggles */}
+                 {/* Actions */}
                  <div className="space-y-2">
-                   <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-3">Update Status</label>
-                   <div className="grid grid-cols-2 gap-2">
-                     <button onClick={handleNoShow} disabled={isUpdatingAppt} className="flex flex-col items-center justify-center gap-1 py-4 rounded-xl border border-[var(--color-brand-700)] hover:bg-red-900/20 hover:border-red-500 hover:text-red-400 transition-colors cursor-pointer">
-                       <UserX className="w-5 h-5" />
-                       <span className="text-xs font-bold">No-Show</span>
-                     </button>
+                   <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-3">
+                     {selectedAppt.is_blockout ? 'Manage Blockout' : 'Update Status'}
+                   </label>
+                   <div className={selectedAppt.is_blockout ? 'grid grid-cols-1 gap-2' : 'grid grid-cols-2 gap-2'}>
+                     {!selectedAppt.is_blockout && (
+                       <button onClick={handleNoShow} disabled={isUpdatingAppt} className="flex flex-col items-center justify-center gap-1 py-4 rounded-xl border border-[var(--color-brand-700)] hover:bg-red-900/20 hover:border-red-500 hover:text-red-400 transition-colors cursor-pointer">
+                         <UserX className="w-5 h-5" />
+                         <span className="text-xs font-bold">No-Show</span>
+                       </button>
+                     )}
                      <button onClick={handleDeleteAppt} disabled={isUpdatingAppt} className="flex flex-col items-center justify-center gap-1 py-4 rounded-xl border border-[var(--color-brand-700)] hover:bg-red-900/30 hover:border-red-600 hover:text-red-400 transition-colors cursor-pointer disabled:opacity-50">
                        <Trash2 className="w-5 h-5" />
-                       <span className="text-xs font-bold">Delete</span>
+                       <span className="text-xs font-bold">{selectedAppt.is_blockout ? 'Remove Blockout' : 'Delete'}</span>
                      </button>
                    </div>
                  </div>
@@ -1515,48 +1578,196 @@ export default function AdminDashboard() {
         </div>
       )}
 
-      {/* ADMIN BOOKING MODAL */}
+      {/* MANUAL BOOK & BLOCK TIME MODAL */}
       {showBookModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
-           <div className="bg-[var(--color-brand-800)] w-full max-w-md rounded-2xl flex flex-col border border-[var(--color-brand-700)] shadow-2xl">
+           <div className="bg-[var(--color-brand-800)] w-full max-w-md rounded-2xl flex flex-col border border-[var(--color-brand-700)] shadow-2xl overflow-hidden">
               <div className="flex items-center justify-between p-6 border-b border-[var(--color-brand-700)]">
-                <h2 className="text-xl font-bold">Manual Book</h2>
-                <button onClick={() => { setShowBookModal(false); setBookTime(''); setBookNotes(''); }} className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer"><X className="w-6 h-6" /></button>
+                <h2 className="text-xl font-bold">{isBlockoutMode ? 'Block Time' : 'Manual Book'}</h2>
+                <button
+                  onClick={() => {
+                    setShowBookModal(false)
+                    setIsBlockoutMode(false)
+                    setBookTime('')
+                    setBlockEndTime('')
+                    setBookNotes('')
+                    setClientName('')
+                    setClientPhone('')
+                  }}
+                  className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer"
+                >
+                  <X className="w-6 h-6" />
+                </button>
               </div>
+
+              {/* Mode Tabs: Book Client vs Block Time */}
+              <div className="flex bg-[var(--color-brand-900)] p-1 rounded-xl mx-6 mt-4 border border-[var(--color-brand-700)]">
+                <button
+                  type="button"
+                  onClick={() => setIsBlockoutMode(false)}
+                  className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all cursor-pointer ${
+                    !isBlockoutMode
+                      ? 'bg-[var(--color-brand-accent)] text-white shadow-md'
+                      : 'text-[var(--color-brand-muted)] hover:text-white'
+                  }`}
+                >
+                  Book Client
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsBlockoutMode(true)
+                    if (!blockEndTime && bookTime) {
+                      setBlockEndTime(minutesToTime(toMinutes(bookTime) + 60))
+                    }
+                  }}
+                  className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all cursor-pointer ${
+                    isBlockoutMode
+                      ? 'bg-zinc-700 text-white shadow-md'
+                      : 'text-[var(--color-brand-muted)] hover:text-white'
+                  }`}
+                >
+                  Block Time
+                </button>
+              </div>
+
               <form onSubmit={handleAdminBooking} className="p-6 space-y-4">
-                 <select required value={bookService?.id || ''} onChange={(e) => setBookService(adminServices.find(s => s.id === e.target.value))} className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer text-white">
-                    <option value="" disabled>Select service...</option>
-                    {adminServices.map(s => <option key={s.id} value={s.id}>{s.name} ({s.duration_minutes}m)</option>)}
-                 </select>
-                 <div className="grid grid-cols-2 gap-4">
-                    <input type="date" required value={bookDate} onChange={(e) => setBookDate(e.target.value)} className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none [color-scheme:dark] cursor-pointer text-white" />
-                    <select required value={bookTime} onChange={(e) => setBookTime(e.target.value)} className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer disabled:opacity-50 text-white">
-                      <option value="" disabled>{!bookService ? 'Select service first' : bookSlots.length === 0 ? 'No slots' : 'Select time...'}</option>
-                      {bookTime && !bookSlots.includes(bookTime) && <option value={bookTime}>{formatTime(bookTime)}</option>}
-                      {bookSlots.map(time => <option key={time} value={time}>{formatTime(time)}</option>)}
-                    </select>
+                 {/* DATE FIELD - ALWAYS SHOWN */}
+                 <div>
+                   <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">Date</label>
+                   <input
+                     type="date"
+                     required
+                     value={bookDate}
+                     onChange={(e) => setBookDate(e.target.value)}
+                     className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none [color-scheme:dark] cursor-pointer text-white"
+                   />
                  </div>
-                 <div className="space-y-3 pt-4 border-t border-[var(--color-brand-700)]">
-                    <div className="relative">
-                      <User className="w-4 h-4 text-[var(--color-brand-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
-                      <input type="text" required placeholder="Client Name" value={clientName} onChange={(e) => setClientName(e.target.value)} className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-[var(--color-brand-accent)]" />
-                    </div>
-                    <div className="relative">
-                      <Phone className="w-4 h-4 text-[var(--color-brand-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
-                      <input type="tel" required placeholder="Phone Number" value={clientPhone} onChange={(e) => setClientPhone(e.target.value)} className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-[var(--color-brand-accent)]" />
-                    </div>
-                    <div className="relative">
-                      <FileText className="w-4 h-4 text-[var(--color-brand-muted)] absolute left-3 top-3.5" />
-                      <textarea
-                        placeholder="Appointment Notes (Optional)"
-                        value={bookNotes}
-                        onChange={(e) => setBookNotes(e.target.value)}
-                        rows={2}
-                        className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-[var(--color-brand-accent)] resize-none"
-                      />
-                    </div>
-                 </div>
-                 <button type="submit" disabled={isBooking || !bookTime || !bookService || !clientName || !clientPhone} className="w-full bg-[var(--color-brand-accent)] text-white font-bold p-3 rounded-xl mt-4 cursor-pointer disabled:opacity-50 hover:not-disabled:brightness-110">Confirm Appointment</button>
+
+                 {!isBlockoutMode ? (
+                   <>
+                     {/* SERVICE SELECT */}
+                     <div>
+                       <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">Service</label>
+                       <select
+                         required
+                         value={bookService?.id || ''}
+                         onChange={(e) => setBookService(adminServices.find(s => s.id === e.target.value))}
+                         className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer text-white"
+                       >
+                         <option value="" disabled>Select service...</option>
+                         {adminServices.map(s => <option key={s.id} value={s.id}>{s.name} ({s.duration_minutes}m)</option>)}
+                       </select>
+                     </div>
+
+                     {/* START TIME SELECT */}
+                     <div>
+                       <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">Start Time</label>
+                       <select
+                         required
+                         value={bookTime}
+                         onChange={(e) => setBookTime(e.target.value)}
+                         className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer disabled:opacity-50 text-white"
+                       >
+                         <option value="" disabled>{!bookService ? 'Select service first' : bookSlots.length === 0 ? 'No slots' : 'Select time...'}</option>
+                         {bookTime && !bookSlots.includes(bookTime) && <option value={bookTime}>{formatTime(bookTime)}</option>}
+                         {bookSlots.map(time => <option key={time} value={time}>{formatTime(time)}</option>)}
+                       </select>
+                     </div>
+
+                     <div className="space-y-3 pt-4 border-t border-[var(--color-brand-700)]">
+                        <div className="relative">
+                          <User className="w-4 h-4 text-[var(--color-brand-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
+                          <input
+                            type="text"
+                            required
+                            placeholder="Client Name"
+                            value={clientName}
+                            onChange={(e) => setClientName(e.target.value)}
+                            className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-[var(--color-brand-accent)]"
+                          />
+                        </div>
+                        <div className="relative">
+                          <Phone className="w-4 h-4 text-[var(--color-brand-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
+                          <input
+                            type="tel"
+                            required
+                            placeholder="Phone Number"
+                            value={clientPhone}
+                            onChange={(e) => setClientPhone(e.target.value)}
+                            className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-[var(--color-brand-accent)]"
+                          />
+                        </div>
+                        <div className="relative">
+                          <FileText className="w-4 h-4 text-[var(--color-brand-muted)] absolute left-3 top-3.5" />
+                          <textarea
+                            placeholder="Appointment Notes (Optional)"
+                            value={bookNotes}
+                            onChange={(e) => setBookNotes(e.target.value)}
+                            rows={2}
+                            className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-[var(--color-brand-accent)] resize-none"
+                          />
+                        </div>
+                     </div>
+
+                     <button
+                       type="submit"
+                       disabled={isBooking || !bookTime || !bookService || !clientName || !clientPhone}
+                       className="w-full bg-[var(--color-brand-accent)] text-white font-bold p-3 rounded-xl mt-4 cursor-pointer disabled:opacity-50 hover:not-disabled:brightness-110"
+                     >
+                       Confirm Appointment
+                     </button>
+                   </>
+                 ) : (
+                   <>
+                     {/* BLOCKOUT MODE: ONLY START TIME, END TIME, AND NOTES */}
+                     <div className="grid grid-cols-2 gap-4">
+                       <div>
+                         <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">Start Time</label>
+                         <input
+                           type="time"
+                           required
+                           value={bookTime}
+                           onChange={(e) => setBookTime(e.target.value)}
+                           className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none [color-scheme:dark] cursor-pointer text-white"
+                         />
+                       </div>
+                       <div>
+                         <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">End Time</label>
+                         <input
+                           type="time"
+                           required
+                           value={blockEndTime}
+                           onChange={(e) => setBlockEndTime(e.target.value)}
+                           className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none [color-scheme:dark] cursor-pointer text-white"
+                         />
+                       </div>
+                     </div>
+
+                     <div className="space-y-1.5 pt-2">
+                       <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider">Reason / Notes</label>
+                       <div className="relative">
+                         <FileText className="w-4 h-4 text-[var(--color-brand-muted)] absolute left-3 top-3.5" />
+                         <textarea
+                           placeholder="e.g. Lunch, Doctor, Running Late..."
+                           value={bookNotes}
+                           onChange={(e) => setBookNotes(e.target.value)}
+                           rows={2}
+                           className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-zinc-500 resize-none"
+                         />
+                       </div>
+                     </div>
+
+                     <button
+                       type="submit"
+                       disabled={isBooking || !bookTime || !blockEndTime}
+                       className="w-full bg-zinc-700 hover:bg-zinc-600 text-white font-bold p-3 rounded-xl mt-4 cursor-pointer disabled:opacity-50 transition-colors shadow-md flex items-center justify-center gap-2"
+                     >
+                       <Ban className="w-4 h-4" />
+                       {isBooking ? 'Blocking Time...' : 'Confirm Blockout'}
+                     </button>
+                   </>
+                 )}
               </form>
            </div>
         </div>
@@ -1798,9 +2009,12 @@ export default function AdminDashboard() {
         {touchPos && touchDraggedAppt && isTouchDragging && (() => {
           const durationMins = toMinutes(touchDraggedAppt.end_time) - toMinutes(touchDraggedAppt.start_time)
           const previewHeight = durationMins * (PIXELS_PER_HOUR / 60)
-          const isBlocked = touchDraggedAppt.status === 'blocked'
+          const isBlockout = Boolean(touchDraggedAppt.is_blockout)
+          const isBlocked = touchDraggedAppt.status === 'blocked' || isBlockout
           const isCompleted = touchDraggedAppt.status === 'completed'
-          const colorClasses = isBlocked
+          const colorClasses = isBlockout
+            ? 'bg-zinc-800 border-zinc-600 ring-zinc-500/50 text-zinc-200'
+            : isBlocked
             ? 'bg-orange-950/95 border-orange-500 ring-orange-500/50 text-orange-200'
             : isCompleted
             ? 'bg-emerald-950/95 border-emerald-500 ring-emerald-500/50 text-emerald-200'
@@ -1817,12 +2031,16 @@ export default function AdminDashboard() {
               }}
             >
               <div className="flex items-center gap-2.5">
-                <Clock className="w-4 h-4 text-[var(--color-brand-accent)] flex-shrink-0 animate-pulse" />
+                {isBlockout ? (
+                  <Ban className="w-4 h-4 text-zinc-400 flex-shrink-0 animate-pulse" />
+                ) : (
+                  <Clock className="w-4 h-4 text-[var(--color-brand-accent)] flex-shrink-0 animate-pulse" />
+                )}
                 <div className="flex flex-col text-left min-w-0">
                   <span className="truncate max-w-[160px] text-white font-bold">
-                    {isBlocked ? 'BLOCKED TIME' : touchDraggedAppt.clients?.name || 'Walk-In'}
+                    {isBlockout ? (touchDraggedAppt.notes || 'Blocked Time') : isBlocked ? 'BLOCKED TIME' : touchDraggedAppt.clients?.name || 'Walk-In'}
                   </span>
-                  <span className="text-[10px] font-semibold text-[var(--color-brand-accent)] truncate">
+                  <span className={`text-[10px] font-semibold truncate ${isBlockout ? 'text-zinc-400' : 'text-[var(--color-brand-accent)]'}`}>
                     {hoveredDropSlot ? `${formatTime(hoveredDropSlot.time)} (${hoveredDropSlot.date})` : formatTime(touchDraggedAppt.start_time)}
                   </span>
                 </div>
@@ -2105,9 +2323,12 @@ export default function AdminDashboard() {
                       {!isOff && dayAppts.length > 0 && (
                         <div className="w-full space-y-1 overflow-hidden mt-1 flex-1">
                           {dayAppts.slice(0, 3).map(appt => {
-                            const isBlocked = appt.status === 'blocked'
+                            const isBlockout = Boolean(appt.is_blockout)
+                            const isBlocked = appt.status === 'blocked' || isBlockout
                             const isCompleted = appt.status === 'completed'
-                            const chipBg = isBlocked
+                            const chipBg = isBlockout
+                              ? 'bg-zinc-800 border-zinc-600 text-zinc-300'
+                              : isBlocked
                               ? 'bg-orange-950/80 border-orange-700/60 text-orange-200'
                               : isCompleted
                               ? 'bg-emerald-950/80 border-emerald-700/60 text-emerald-200'
@@ -2118,11 +2339,11 @@ export default function AdminDashboard() {
                                 key={appt.id}
                                 className={`text-[10px] truncate px-1.5 py-0.5 rounded border font-medium flex items-center gap-1 ${chipBg}`}
                               >
-                                <span className="text-[var(--color-brand-accent)] font-bold text-[9px] flex-shrink-0">
+                                <span className={`${isBlockout ? 'text-zinc-400' : 'text-[var(--color-brand-accent)]'} font-bold text-[9px] flex-shrink-0`}>
                                   {formatTime(appt.start_time).replace(':00', '')}
                                 </span>
                                 <span className="truncate">
-                                  {isBlocked ? 'Blocked' : appt.clients?.name || 'Walk-In'}
+                                  {isBlockout ? (appt.notes || 'Blocked') : isBlocked ? 'Blocked' : appt.clients?.name || 'Walk-In'}
                                 </span>
                               </div>
                             )
