@@ -108,6 +108,8 @@ export default function AdminDashboard() {
   const [isTouchDragging, setIsTouchDragging] = useState(false)
   const [isRescheduling, setIsRescheduling] = useState(false)
   const touchStartRef = useRef<{ clientX: number, clientY: number, appt: any, hasMoved: boolean } | null>(null)
+  const isDragActiveRef = useRef(false)
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const justDraggedRef = useRef(false)
 
   // --- MODALS STATE ---
@@ -161,7 +163,12 @@ export default function AdminDashboard() {
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => { setSession(session); setLoading(false) })
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => { setSession(session) })
-    return () => subscription.unsubscribe()
+    return () => {
+      subscription.unsubscribe()
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current)
+      }
+    }
   }, [])
 
   useEffect(() => {
@@ -953,17 +960,105 @@ export default function AdminDashboard() {
     </div>
   )
 
-  // --- MOBILE TOUCH DRAG-AND-DROP RESCHEDULING ENGINE ---
+  // --- REUSABLE DRAG-AND-DROP COORDINATE AND RESCHEDULE HELPERS ---
+  const updateHoveredSlot = (clientX: number, clientY: number) => {
+    const elem = document.elementFromPoint(clientX, clientY)
+    let colElem = elem?.closest('[data-day-column="true"]') as HTMLElement | null
+    if (!colElem) {
+      const allColumns = Array.from(document.querySelectorAll('[data-day-column="true"]')) as HTMLElement[]
+      colElem = allColumns.find(c => {
+        const r = c.getBoundingClientRect()
+        return clientX >= r.left && clientX <= r.right
+      }) || null
+    }
+
+    if (colElem) {
+      const colDate = colElem.dataset.date || selectedDate
+      const scrollContainer = (colElem.closest('.overflow-y-auto') || document.querySelector('.overflow-y-auto')) as HTMLElement | null
+      const containerTop = scrollContainer ? scrollContainer.getBoundingClientRect().top : colElem.getBoundingClientRect().top
+      const scrollTop = scrollContainer ? scrollContainer.scrollTop : 0
+      const columnOffsetTop = colElem.offsetTop || 0
+      const relativeY = (clientY - containerTop) + scrollTop - columnOffsetTop
+
+      const maxSlotIndex = (TOTAL_HOURS * 4) - 1
+      const slotIndex = Math.max(0, Math.min(maxSlotIndex, Math.floor(relativeY / (PIXELS_PER_HOUR / 4))))
+      const totalMins = CALENDAR_START_HOUR * 60 + (slotIndex * 15)
+      const slotTime = `${Math.floor(totalMins / 60).toString().padStart(2, '0')}:${(totalMins % 60).toString().padStart(2, '0')}`
+      setHoveredDropSlot({ date: colDate, time: slotTime })
+    } else {
+      setHoveredDropSlot(null)
+    }
+  }
+
+  const executeRescheduleAt = (appt: any, clientX: number, clientY: number) => {
+    const elem = document.elementFromPoint(clientX, clientY)
+    let colElem = elem?.closest('[data-day-column="true"]') as HTMLElement | null
+    if (!colElem) {
+      const allColumns = Array.from(document.querySelectorAll('[data-day-column="true"]')) as HTMLElement[]
+      colElem = allColumns.find(c => {
+        const r = c.getBoundingClientRect()
+        return clientX >= r.left && clientX <= r.right
+      }) || null
+    }
+
+    const scrollContainer = (colElem?.closest('.overflow-y-auto') || document.querySelector('.overflow-y-auto')) as HTMLElement | null
+
+    let targetColumn = colElem
+    if (!targetColumn && hoveredDropSlot?.date) {
+      targetColumn = document.querySelector(`[data-day-column="true"][data-date="${hoveredDropSlot.date}"]`) as HTMLElement | null
+    }
+    if (!targetColumn) {
+      targetColumn = (document.querySelector(`[data-day-column="true"][data-date="${selectedDate}"]`) as HTMLElement | null)
+        || (document.querySelector('[data-day-column="true"]') as HTMLElement | null)
+    }
+
+    if (targetColumn) {
+      const targetDate = targetColumn.dataset.date || hoveredDropSlot?.date || selectedDate
+      const containerTop = scrollContainer ? scrollContainer.getBoundingClientRect().top : targetColumn.getBoundingClientRect().top
+      const scrollTop = scrollContainer ? scrollContainer.scrollTop : 0
+      const columnOffsetTop = targetColumn.offsetTop || 0
+      const relativeY = (clientY - containerTop) + scrollTop - columnOffsetTop
+
+      const maxSlotIndex = (TOTAL_HOURS * 4) - 1
+      const slotIndex = Math.max(0, Math.min(maxSlotIndex, Math.floor(relativeY / (PIXELS_PER_HOUR / 4))))
+      const totalMins = CALENDAR_START_HOUR * 60 + (slotIndex * 15)
+      const slotTime = `${Math.floor(totalMins / 60).toString().padStart(2, '0')}:${(totalMins % 60).toString().padStart(2, '0')}`
+      handleDropReschedule(appt, targetDate, slotTime)
+    }
+  }
+
+  // --- HOLD-TO-DRAG (LONG-PRESS 550ms) MOBILE TOUCH ENGINE ---
   const handleTouchStart = (e: React.TouchEvent, appt: any) => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current)
+      longPressTimerRef.current = null
+    }
+
     const touch = e.touches[0]
+    isDragActiveRef.current = false
     touchStartRef.current = {
       clientX: touch.clientX,
       clientY: touch.clientY,
       appt,
       hasMoved: false
     }
-    setTouchDraggedAppt(appt)
-    setTouchPos({ x: touch.clientX, y: touch.clientY })
+
+    // Deliberate Hold-to-Drag delay threshold (550ms)
+    longPressTimerRef.current = setTimeout(() => {
+      isDragActiveRef.current = true
+      setIsTouchDragging(true)
+      setTouchDraggedAppt(appt)
+      setTouchPos({ x: touch.clientX, y: touch.clientY })
+
+      // Subtle haptic feedback when detaching/unsticking
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        try {
+          navigator.vibrate(50)
+        } catch {
+          // ignore if vibration policy restricted
+        }
+      }
+    }, 550)
   }
 
   const handleTouchMove = (e: React.TouchEvent) => {
@@ -971,94 +1066,60 @@ export default function AdminDashboard() {
     const touch = e.touches[0]
     const dx = touch.clientX - touchStartRef.current.clientX
     const dy = touch.clientY - touchStartRef.current.clientY
-    if (Math.hypot(dx, dy) >= 10) {
-      touchStartRef.current.hasMoved = true
-      setIsTouchDragging(true)
+    const dist = Math.hypot(dx, dy)
+
+    if (!isDragActiveRef.current) {
+      // Hold timer has NOT completed yet
+      if (dist >= 10) {
+        // Finger moved >10px: user is scrolling the calendar!
+        // Immediately abort hold timer and do NOT hijack or prevent default scroll
+        if (longPressTimerRef.current) {
+          clearTimeout(longPressTimerRef.current)
+          longPressTimerRef.current = null
+        }
+        touchStartRef.current.hasMoved = true
+      }
+      return
     }
 
-    if (touchStartRef.current.hasMoved) {
-      if (e.cancelable) e.preventDefault()
-      setTouchPos({ x: touch.clientX, y: touch.clientY })
-
-      const elem = document.elementFromPoint(touch.clientX, touch.clientY)
-      let colElem = elem?.closest('[data-day-column="true"]') as HTMLElement | null
-      if (!colElem) {
-        const allColumns = Array.from(document.querySelectorAll('[data-day-column="true"]')) as HTMLElement[]
-        colElem = allColumns.find(c => {
-          const r = c.getBoundingClientRect()
-          return touch.clientX >= r.left && touch.clientX <= r.right
-        }) || null
-      }
-
-      if (colElem) {
-        const colDate = colElem.dataset.date || selectedDate
-        const scrollContainer = (colElem.closest('.overflow-y-auto') || document.querySelector('.overflow-y-auto')) as HTMLElement | null
-        const containerTop = scrollContainer ? scrollContainer.getBoundingClientRect().top : colElem.getBoundingClientRect().top
-        const scrollTop = scrollContainer ? scrollContainer.scrollTop : 0
-        const columnOffsetTop = colElem.offsetTop || 0
-        const relativeY = (touch.clientY - containerTop) + scrollTop - columnOffsetTop
-
-        const maxSlotIndex = (TOTAL_HOURS * 4) - 1
-        const slotIndex = Math.max(0, Math.min(maxSlotIndex, Math.floor(relativeY / (PIXELS_PER_HOUR / 4))))
-        const totalMins = CALENDAR_START_HOUR * 60 + (slotIndex * 15)
-        const slotTime = `${Math.floor(totalMins / 60).toString().padStart(2, '0')}:${(totalMins % 60).toString().padStart(2, '0')}`
-        setHoveredDropSlot({ date: colDate, time: slotTime })
-      } else {
-        setHoveredDropSlot(null)
-      }
+    // Hold timer HAS completed (drag is active):
+    touchStartRef.current.hasMoved = true
+    if (e.cancelable) {
+      e.preventDefault()
     }
+    setTouchPos({ x: touch.clientX, y: touch.clientY })
+    updateHoveredSlot(touch.clientX, touch.clientY)
   }
 
   const handleTouchEnd = (e: React.TouchEvent) => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current)
+      longPressTimerRef.current = null
+    }
+
     if (!touchStartRef.current) return
     const { appt, hasMoved } = touchStartRef.current
+    const wasDragActive = isDragActiveRef.current
 
-    if (!hasMoved) {
-      // Tap without moving (< 10px) -> Open Appointment Detail modal
-      handleOpenAppt(appt)
+    if (!wasDragActive) {
+      // Drag was never activated
+      // If released before 550ms and didn't scroll, treat as standard tap -> open details
+      if (!hasMoved) {
+        justDraggedRef.current = true
+        setTimeout(() => { justDraggedRef.current = false }, 350)
+        handleOpenAppt(appt)
+      }
     } else {
-      // Dragged >= 10px -> Reschedule
+      // Drag WAS active -> execute rescheduling drop
       justDraggedRef.current = true
       setTimeout(() => { justDraggedRef.current = false }, 350)
 
       const touch = e.changedTouches[0]
-      const elem = document.elementFromPoint(touch.clientX, touch.clientY)
-      let colElem = elem?.closest('[data-day-column="true"]') as HTMLElement | null
-      if (!colElem) {
-        const allColumns = Array.from(document.querySelectorAll('[data-day-column="true"]')) as HTMLElement[]
-        colElem = allColumns.find(c => {
-          const r = c.getBoundingClientRect()
-          return touch.clientX >= r.left && touch.clientX <= r.right
-        }) || null
-      }
-
-      const scrollContainer = (colElem?.closest('.overflow-y-auto') || document.querySelector('.overflow-y-auto')) as HTMLElement | null
-
-      let targetColumn = colElem
-      if (!targetColumn && hoveredDropSlot?.date) {
-        targetColumn = document.querySelector(`[data-day-column="true"][data-date="${hoveredDropSlot.date}"]`) as HTMLElement | null
-      }
-      if (!targetColumn) {
-        targetColumn = (document.querySelector(`[data-day-column="true"][data-date="${selectedDate}"]`) as HTMLElement | null)
-          || (document.querySelector('[data-day-column="true"]') as HTMLElement | null)
-      }
-
-      if (targetColumn) {
-        const targetDate = targetColumn.dataset.date || hoveredDropSlot?.date || selectedDate
-        const containerTop = scrollContainer ? scrollContainer.getBoundingClientRect().top : targetColumn.getBoundingClientRect().top
-        const scrollTop = scrollContainer ? scrollContainer.scrollTop : 0
-        const columnOffsetTop = targetColumn.offsetTop || 0
-        const relativeY = (touch.clientY - containerTop) + scrollTop - columnOffsetTop
-
-        const maxSlotIndex = (TOTAL_HOURS * 4) - 1
-        const slotIndex = Math.max(0, Math.min(maxSlotIndex, Math.floor(relativeY / (PIXELS_PER_HOUR / 4))))
-        const totalMins = CALENDAR_START_HOUR * 60 + (slotIndex * 15)
-        const slotTime = `${Math.floor(totalMins / 60).toString().padStart(2, '0')}:${(totalMins % 60).toString().padStart(2, '0')}`
-        handleDropReschedule(appt, targetDate, slotTime)
-      }
+      executeRescheduleAt(appt, touch.clientX, touch.clientY)
     }
 
     touchStartRef.current = null
+    isDragActiveRef.current = false
     setIsTouchDragging(false)
     setTouchDraggedAppt(null)
     setTouchPos(null)
@@ -1066,11 +1127,66 @@ export default function AdminDashboard() {
   }
 
   const handleTouchCancel = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current)
+      longPressTimerRef.current = null
+    }
     touchStartRef.current = null
+    isDragActiveRef.current = false
     setIsTouchDragging(false)
     setTouchDraggedAppt(null)
     setTouchPos(null)
     setHoveredDropSlot(null)
+  }
+
+  // --- DESKTOP CLICK / DRAG PARITY ENGINE ---
+  const handleMouseDown = (e: React.MouseEvent, appt: any) => {
+    if (e.button !== 0) return // Only primary click
+    if (justDraggedRef.current) return
+
+    const startX = e.clientX
+    const startY = e.clientY
+    let hasMoved = false
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const dx = moveEvent.clientX - startX
+      const dy = moveEvent.clientY - startY
+      const dist = Math.hypot(dx, dy)
+
+      if (!hasMoved && dist >= 6) {
+        hasMoved = true
+        isDragActiveRef.current = true
+        setIsTouchDragging(true)
+        setTouchDraggedAppt(appt)
+        setTouchPos({ x: moveEvent.clientX, y: moveEvent.clientY })
+      }
+
+      if (hasMoved) {
+        moveEvent.preventDefault()
+        setTouchPos({ x: moveEvent.clientX, y: moveEvent.clientY })
+        updateHoveredSlot(moveEvent.clientX, moveEvent.clientY)
+      }
+    }
+
+    const handleMouseUp = (upEvent: MouseEvent) => {
+      window.removeEventListener('mousemove', handleMouseMove)
+      window.removeEventListener('mouseup', handleMouseUp)
+
+      if (hasMoved && isDragActiveRef.current) {
+        justDraggedRef.current = true
+        setTimeout(() => { justDraggedRef.current = false }, 350)
+        executeRescheduleAt(appt, upEvent.clientX, upEvent.clientY)
+      }
+
+      isDragActiveRef.current = false
+      setIsTouchDragging(false)
+      setTouchDraggedAppt(null)
+      setTouchPos(null)
+      setHoveredDropSlot(null)
+    }
+
+    window.addEventListener('mousemove', handleMouseMove)
+    window.addEventListener('mouseup', handleMouseUp)
   }
 
   // REUSABLE TIME-RAIL RENDER ENGINE (ZERO BORDER DRIFT - GRADIENT-BASED)
@@ -1182,15 +1298,22 @@ export default function AdminDashboard() {
                 onTouchMove={handleTouchMove}
                 onTouchEnd={handleTouchEnd}
                 onTouchCancel={handleTouchCancel}
+                onMouseDown={(e) => handleMouseDown(e, appt)}
                 onClick={(e) => {
                   e.stopPropagation()
-                  if (touchDraggedAppt || justDraggedRef.current) return
+                  if (touchDraggedAppt || isTouchDragging || justDraggedRef.current || isDragActiveRef.current) return
                   handleOpenAppt(appt)
                 }}
-                className={`absolute left-px right-px m-0 box-border rounded-sm p-0.5 sm:p-1 overflow-hidden border shadow-sm flex flex-col text-left z-20 cursor-grab active:cursor-grabbing hover:brightness-125 transition-all touch-none select-none ${
-                  isThisBeingDragged ? 'opacity-30 ring-2 ring-[var(--color-brand-accent)]' : ''
+                className={`absolute left-px right-px m-0 box-border rounded-sm p-0.5 sm:p-1 overflow-hidden border shadow-sm flex flex-col text-left z-20 cursor-grab active:cursor-grabbing hover:brightness-125 transition-all select-none ${
+                  isThisBeingDragged
+                    ? 'scale-105 shadow-2xl ring-2 ring-[var(--color-brand-accent)] z-30 opacity-80 animate-pulse touch-none'
+                    : 'touch-pan-y'
                 } ${colorClasses}`}
-                style={{ top: `${top}px`, height: `${height}px`, touchAction: 'none' }}
+                style={{
+                  top: `${top}px`,
+                  height: `${height}px`,
+                  touchAction: isThisBeingDragged ? 'none' : 'pan-y'
+                }}
               >
                 <div className="text-[9px] sm:text-[10px] font-bold leading-tight truncate overflow-hidden whitespace-nowrap w-full pointer-events-none">
                   {formatTime(appt.start_time).replace(':00', '')} {isBlocked ? 'BLOCKED' : appt.clients?.name || 'Walk-In'}
@@ -1211,15 +1334,22 @@ export default function AdminDashboard() {
               onTouchMove={handleTouchMove}
               onTouchEnd={handleTouchEnd}
               onTouchCancel={handleTouchCancel}
+              onMouseDown={(e) => handleMouseDown(e, appt)}
               onClick={(e) => {
                 e.stopPropagation()
-                if (touchDraggedAppt || justDraggedRef.current) return
+                if (touchDraggedAppt || isTouchDragging || justDraggedRef.current || isDragActiveRef.current) return
                 handleOpenAppt(appt)
               }}
-              className={`absolute left-1.5 right-1.5 m-0 box-border rounded-lg p-2 overflow-hidden border shadow-md flex flex-col text-left z-20 cursor-grab active:cursor-grabbing hover:brightness-110 transition-all touch-none select-none ${
-                isThisBeingDragged ? 'opacity-30 ring-2 ring-[var(--color-brand-accent)]' : ''
+              className={`absolute left-1.5 right-1.5 m-0 box-border rounded-lg p-2 overflow-hidden border shadow-md flex flex-col text-left z-20 cursor-grab active:cursor-grabbing hover:brightness-110 transition-all select-none ${
+                isThisBeingDragged
+                  ? 'scale-105 shadow-2xl ring-2 ring-[var(--color-brand-accent)] z-30 opacity-80 animate-pulse touch-none'
+                  : 'touch-pan-y'
               } ${colorClasses}`}
-              style={{ top: `${top}px`, height: `${height}px`, touchAction: 'none' }}
+              style={{
+                top: `${top}px`,
+                height: `${height}px`,
+                touchAction: isThisBeingDragged ? 'none' : 'pan-y'
+              }}
             >
               {height <= 25 ? (
                 <div className="flex items-center justify-between text-xs font-bold leading-none pointer-events-none">
@@ -1620,13 +1750,13 @@ export default function AdminDashboard() {
 
     return (
       <div className="h-[100dvh] w-full bg-[var(--color-brand-900)] text-[var(--color-brand-light)] font-sans flex flex-col overflow-hidden relative">
-        {/* Touch Drag Floating Preview (Visually Detached Chip Following Finger) */}
+        {/* Touch / Mouse Drag Floating Preview (Visually Detached Chip Following Finger / Cursor) */}
         {touchPos && touchDraggedAppt && isTouchDragging && (
           <div
-            className="fixed z-50 pointer-events-none -translate-x-1/2 -translate-y-full mb-3 px-3.5 py-2 rounded-xl bg-[var(--color-brand-800)] text-white text-xs font-bold shadow-[0_10px_30px_rgba(0,0,0,0.8)] border-2 border-[var(--color-brand-accent)] flex items-center gap-2.5 select-none"
+            className="fixed z-50 pointer-events-none -translate-x-1/2 -translate-y-full mb-3 px-3.5 py-2 rounded-xl bg-[var(--color-brand-800)] text-white text-xs font-bold shadow-[0_15px_35px_rgba(0,0,0,0.9)] border-2 border-[var(--color-brand-accent)] ring-2 ring-[var(--color-brand-accent)]/50 flex items-center gap-2.5 select-none scale-105 transition-transform"
             style={{ left: `${touchPos.x}px`, top: `${touchPos.y - 12}px`, touchAction: 'none' }}
           >
-            <Clock className="w-4 h-4 text-[var(--color-brand-accent)] flex-shrink-0" />
+            <Clock className="w-4 h-4 text-[var(--color-brand-accent)] flex-shrink-0 animate-pulse" />
             <div className="flex flex-col text-left">
               <span className="truncate max-w-[160px] text-white font-bold">{touchDraggedAppt.clients?.name || 'Appointment'}</span>
               <span className="text-[10px] font-semibold text-[var(--color-brand-accent)]">
