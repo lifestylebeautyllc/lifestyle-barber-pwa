@@ -1049,6 +1049,7 @@ export default function AdminDashboard() {
       setIsTouchDragging(true)
       setTouchDraggedAppt(appt)
       setTouchPos({ x: touch.clientX, y: touch.clientY })
+      document.body.style.overflow = 'hidden'
 
       // Subtle haptic feedback when detaching/unsticking
       if (typeof navigator !== 'undefined' && navigator.vibrate) {
@@ -1092,6 +1093,7 @@ export default function AdminDashboard() {
   }
 
   const handleTouchEnd = (e: React.TouchEvent) => {
+    document.body.style.overflow = ''
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current)
       longPressTimerRef.current = null
@@ -1127,6 +1129,7 @@ export default function AdminDashboard() {
   }
 
   const handleTouchCancel = () => {
+    document.body.style.overflow = ''
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current)
       longPressTimerRef.current = null
@@ -1159,6 +1162,7 @@ export default function AdminDashboard() {
         setIsTouchDragging(true)
         setTouchDraggedAppt(appt)
         setTouchPos({ x: moveEvent.clientX, y: moveEvent.clientY })
+        document.body.style.overflow = 'hidden'
       }
 
       if (hasMoved) {
@@ -1169,6 +1173,7 @@ export default function AdminDashboard() {
     }
 
     const handleMouseUp = (upEvent: MouseEvent) => {
+      document.body.style.overflow = ''
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
 
@@ -1751,20 +1756,41 @@ export default function AdminDashboard() {
     return (
       <div className="h-[100dvh] w-full bg-[var(--color-brand-900)] text-[var(--color-brand-light)] font-sans flex flex-col overflow-hidden relative">
         {/* Touch / Mouse Drag Floating Preview (Visually Detached Chip Following Finger / Cursor) */}
-        {touchPos && touchDraggedAppt && isTouchDragging && (
-          <div
-            className="fixed z-50 pointer-events-none -translate-x-1/2 -translate-y-full mb-3 px-3.5 py-2 rounded-xl bg-[var(--color-brand-800)] text-white text-xs font-bold shadow-[0_15px_35px_rgba(0,0,0,0.9)] border-2 border-[var(--color-brand-accent)] ring-2 ring-[var(--color-brand-accent)]/50 flex items-center gap-2.5 select-none scale-105 transition-transform"
-            style={{ left: `${touchPos.x}px`, top: `${touchPos.y - 12}px`, touchAction: 'none' }}
-          >
-            <Clock className="w-4 h-4 text-[var(--color-brand-accent)] flex-shrink-0 animate-pulse" />
-            <div className="flex flex-col text-left">
-              <span className="truncate max-w-[160px] text-white font-bold">{touchDraggedAppt.clients?.name || 'Appointment'}</span>
-              <span className="text-[10px] font-semibold text-[var(--color-brand-accent)]">
-                {hoveredDropSlot ? `${formatTime(hoveredDropSlot.time)} (${hoveredDropSlot.date})` : formatTime(touchDraggedAppt.start_time)}
-              </span>
+        {touchPos && touchDraggedAppt && isTouchDragging && (() => {
+          const durationMins = toMinutes(touchDraggedAppt.end_time) - toMinutes(touchDraggedAppt.start_time)
+          const previewHeight = durationMins * (PIXELS_PER_HOUR / 60)
+          const isBlocked = touchDraggedAppt.status === 'blocked'
+          const isCompleted = touchDraggedAppt.status === 'completed'
+          const colorClasses = isBlocked
+            ? 'bg-orange-950/95 border-orange-500 ring-orange-500/50 text-orange-200'
+            : isCompleted
+            ? 'bg-emerald-950/95 border-emerald-500 ring-emerald-500/50 text-emerald-200'
+            : 'bg-[var(--color-brand-800)]/95 border-[var(--color-brand-accent)] ring-[var(--color-brand-accent)]/50 text-white'
+
+          return (
+            <div
+              className={`fixed z-50 pointer-events-none -translate-x-1/2 -translate-y-full mb-3 px-3.5 py-2 rounded-xl text-xs font-bold shadow-[0_20px_45px_rgba(0,0,0,0.95)] border-2 ring-2 select-none scale-105 transition-transform flex flex-col justify-between overflow-hidden min-w-[170px] max-w-[240px] ${colorClasses}`}
+              style={{
+                left: `${touchPos.x}px`,
+                top: `${touchPos.y - 12}px`,
+                height: `${previewHeight}px`,
+                touchAction: 'none'
+              }}
+            >
+              <div className="flex items-center gap-2.5">
+                <Clock className="w-4 h-4 text-[var(--color-brand-accent)] flex-shrink-0 animate-pulse" />
+                <div className="flex flex-col text-left min-w-0">
+                  <span className="truncate max-w-[160px] text-white font-bold">
+                    {isBlocked ? 'BLOCKED TIME' : touchDraggedAppt.clients?.name || 'Walk-In'}
+                  </span>
+                  <span className="text-[10px] font-semibold text-[var(--color-brand-accent)] truncate">
+                    {hoveredDropSlot ? `${formatTime(hoveredDropSlot.time)} (${hoveredDropSlot.date})` : formatTime(touchDraggedAppt.start_time)}
+                  </span>
+                </div>
+              </div>
             </div>
-          </div>
-        )}
+          )
+        })()}
 
         {/* COMPACT STICKY HEADER */}
         <header className="sticky top-0 z-40 bg-[var(--color-brand-900)]/95 backdrop-blur-md border-b border-[var(--color-brand-700)] select-none flex-shrink-0">
