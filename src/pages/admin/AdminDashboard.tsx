@@ -111,6 +111,7 @@ export default function AdminDashboard() {
   const isDragActiveRef = useRef(false)
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const justDraggedRef = useRef(false)
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
 
   // --- MODALS STATE ---
   const [showBookModal, setShowBookModal] = useState(false)
@@ -173,6 +174,9 @@ export default function AdminDashboard() {
 
   // Aggressively prevent native mobile scrolling while appointment dragging is active
   useEffect(() => {
+    const container = scrollContainerRef.current
+    if (!container) return
+
     const preventNativeScroll = (e: TouchEvent) => {
       // If the user has held long enough to unstick the appt, aggressively block scrolling
       if (isDragActiveRef.current) {
@@ -181,12 +185,12 @@ export default function AdminDashboard() {
     }
 
     // The passive: false flag is REQUIRED for e.preventDefault() to work on mobile
-    document.addEventListener('touchmove', preventNativeScroll, { passive: false })
+    container.addEventListener('touchmove', preventNativeScroll, { passive: false })
 
     return () => {
-      document.removeEventListener('touchmove', preventNativeScroll)
+      container.removeEventListener('touchmove', preventNativeScroll)
     }
-  }, [])
+  }, [viewMode, activeModule])
 
   useEffect(() => {
     async function fetchRoster() {
@@ -1067,6 +1071,11 @@ export default function AdminDashboard() {
       setTouchDraggedAppt(appt)
       setTouchPos({ x: touch.clientX, y: touch.clientY })
 
+      if (scrollContainerRef.current) {
+        scrollContainerRef.current.style.overflow = 'hidden'
+        scrollContainerRef.current.style.touchAction = 'none'
+      }
+
       // Subtle haptic feedback when detaching/unsticking
       if (typeof navigator !== 'undefined' && navigator.vibrate) {
         try {
@@ -1109,6 +1118,11 @@ export default function AdminDashboard() {
   }
 
   const handleTouchEnd = (e: React.TouchEvent) => {
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.style.overflow = ''
+      scrollContainerRef.current.style.touchAction = ''
+    }
+
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current)
       longPressTimerRef.current = null
@@ -1144,6 +1158,11 @@ export default function AdminDashboard() {
   }
 
   const handleTouchCancel = () => {
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.style.overflow = ''
+      scrollContainerRef.current.style.touchAction = ''
+    }
+
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current)
       longPressTimerRef.current = null
@@ -1176,6 +1195,10 @@ export default function AdminDashboard() {
         setIsTouchDragging(true)
         setTouchDraggedAppt(appt)
         setTouchPos({ x: moveEvent.clientX, y: moveEvent.clientY })
+        if (scrollContainerRef.current) {
+          scrollContainerRef.current.style.overflow = 'hidden'
+          scrollContainerRef.current.style.touchAction = 'none'
+        }
       }
 
       if (hasMoved) {
@@ -1186,6 +1209,10 @@ export default function AdminDashboard() {
     }
 
     const handleMouseUp = (upEvent: MouseEvent) => {
+      if (scrollContainerRef.current) {
+        scrollContainerRef.current.style.overflow = ''
+        scrollContainerRef.current.style.touchAction = ''
+      }
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
 
@@ -1939,7 +1966,7 @@ export default function AdminDashboard() {
         <main className="w-full flex-1 overflow-hidden flex flex-col relative">
           {/* DAY VIEW */}
           {viewMode === 'day' && (
-            <div className="flex-1 w-full overflow-y-auto overflow-x-hidden relative flex flex-col">
+            <div ref={scrollContainerRef} className="flex-1 w-full overflow-y-auto overflow-x-hidden relative flex flex-col">
               {isDayOff && (
                 <div className="bg-red-950/80 border-b border-red-800 text-red-200 px-4 py-1.5 text-xs font-semibold flex items-center justify-between z-30 flex-shrink-0">
                   <span>Barber is marked OFF for this day. Tap Manage to adjust schedule.</span>
@@ -1998,7 +2025,7 @@ export default function AdminDashboard() {
               </div>
 
               {/* Scrollable Week Grid */}
-              <div className="flex-1 w-full overflow-y-auto overflow-x-hidden relative flex">
+              <div ref={scrollContainerRef} className="flex-1 w-full overflow-y-auto overflow-x-hidden relative flex">
                 <div className="flex w-full flex-1 min-w-0">
                   {renderYAxis()}
                   <div className="grid grid-cols-7 flex-1 w-full min-w-0">
