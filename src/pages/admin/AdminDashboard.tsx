@@ -171,6 +171,23 @@ export default function AdminDashboard() {
     }
   }, [])
 
+  // Aggressively prevent native mobile scrolling while appointment dragging is active
+  useEffect(() => {
+    const preventNativeScroll = (e: TouchEvent) => {
+      // If the user has held long enough to unstick the appt, aggressively block scrolling
+      if (isDragActiveRef.current) {
+        e.preventDefault()
+      }
+    }
+
+    // The passive: false flag is REQUIRED for e.preventDefault() to work on mobile
+    document.addEventListener('touchmove', preventNativeScroll, { passive: false })
+
+    return () => {
+      document.removeEventListener('touchmove', preventNativeScroll)
+    }
+  }, [])
+
   useEffect(() => {
     async function fetchRoster() {
       if (!session) return
@@ -1049,7 +1066,6 @@ export default function AdminDashboard() {
       setIsTouchDragging(true)
       setTouchDraggedAppt(appt)
       setTouchPos({ x: touch.clientX, y: touch.clientY })
-      document.body.style.overflow = 'hidden'
 
       // Subtle haptic feedback when detaching/unsticking
       if (typeof navigator !== 'undefined' && navigator.vibrate) {
@@ -1093,7 +1109,6 @@ export default function AdminDashboard() {
   }
 
   const handleTouchEnd = (e: React.TouchEvent) => {
-    document.body.style.overflow = ''
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current)
       longPressTimerRef.current = null
@@ -1129,7 +1144,6 @@ export default function AdminDashboard() {
   }
 
   const handleTouchCancel = () => {
-    document.body.style.overflow = ''
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current)
       longPressTimerRef.current = null
@@ -1162,7 +1176,6 @@ export default function AdminDashboard() {
         setIsTouchDragging(true)
         setTouchDraggedAppt(appt)
         setTouchPos({ x: moveEvent.clientX, y: moveEvent.clientY })
-        document.body.style.overflow = 'hidden'
       }
 
       if (hasMoved) {
@@ -1173,7 +1186,6 @@ export default function AdminDashboard() {
     }
 
     const handleMouseUp = (upEvent: MouseEvent) => {
-      document.body.style.overflow = ''
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
 
