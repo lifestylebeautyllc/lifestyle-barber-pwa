@@ -1,9 +1,77 @@
 import { useState, useEffect, useRef } from 'react'
-import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, UserX, Trash2, FileText, Clock, Ban } from 'lucide-react'
+import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, UserX, Trash2, FileText, Clock, Ban, Search, Upload, History, CheckCircle2 } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { getAvailableSlots, getDayOfWeekFromDateString, getBarberDaySchedule, minutesToTime, DAYS_OF_WEEK, DEFAULT_WORKING_HOURS, type DaySchedule } from '../../lib/slotEngine'
 
 // --- HELPER FUNCTIONS ---
+function cleanPhone(raw: string): string {
+  const digits = (raw || '').replace(/\D/g, '')
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return digits.slice(1)
+  }
+  if (digits.length > 10) {
+    return digits.slice(-10)
+  }
+  return digits
+}
+
+function formatPhoneNumber(phone: string): string {
+  if (!phone) return ''
+  const cleaned = cleanPhone(phone)
+  if (cleaned.length === 10) {
+    return `(${cleaned.slice(0, 3)}) ${cleaned.slice(3, 6)}-${cleaned.slice(6)}`
+  }
+  return phone
+}
+
+function parseCSV(csvText: string): string[][] {
+  const rows: string[][] = []
+  let currentRow: string[] = []
+  let currentCell = ''
+  let inQuotes = false
+
+  for (let i = 0; i < csvText.length; i++) {
+    const char = csvText[i]
+    const nextChar = csvText[i + 1]
+
+    if (inQuotes) {
+      if (char === '"' && nextChar === '"') {
+        currentCell += '"'
+        i++
+      } else if (char === '"') {
+        inQuotes = false
+      } else {
+        currentCell += char
+      }
+    } else {
+      if (char === '"') {
+        inQuotes = true
+      } else if (char === ',') {
+        currentRow.push(currentCell.trim())
+        currentCell = ''
+      } else if (char === '\r' && nextChar === '\n') {
+        currentRow.push(currentCell.trim())
+        rows.push(currentRow)
+        currentRow = []
+        currentCell = ''
+        i++
+      } else if (char === '\n' || char === '\r') {
+        currentRow.push(currentCell.trim())
+        rows.push(currentRow)
+        currentRow = []
+        currentCell = ''
+      } else {
+        currentCell += char
+      }
+    }
+  }
+  if (currentCell.length > 0 || currentRow.length > 0) {
+    currentRow.push(currentCell.trim())
+    rows.push(currentRow)
+  }
+  return rows
+}
+
 function formatTime(timeStr: string) {
   if (!timeStr) return ''
   const [hours, mins] = timeStr.split(':').map(Number)
@@ -163,6 +231,33 @@ export default function AdminDashboard() {
   const [editingServiceId, setEditingServiceId] = useState<string | null>(null)
   const [editForm, setEditForm] = useState({ name: '', duration: '30', price: '' })
 
+  // --- CLIENT DIRECTORY CRM & VAGARO CSV IMPORTER STATE ---
+  const [clientsList, setClientsList] = useState<any[]>([])
+  const [allAppointmentsByClient, setAllAppointmentsByClient] = useState<Record<string, any[]>>({})
+  const [allShopServices, setAllShopServices] = useState<any[]>([])
+  const [loadingClients, setLoadingClients] = useState(false)
+  const [clientSearch, setClientSearch] = useState('')
+  const [visibleClientCount, setVisibleClientCount] = useState(100)
+  const csvFileInputRef = useRef<HTMLInputElement>(null)
+  const [isImportingCSV, setIsImportingCSV] = useState(false)
+  const [csvImportResult, setCsvImportResult] = useState<string | null>(null)
+
+  // Manual Add Client Modal State
+  const [showAddClientModal, setShowAddClientModal] = useState(false)
+  const [newClientName, setNewClientName] = useState('')
+  const [newClientPhone, setNewClientPhone] = useState('')
+  const [newClientNotes, setNewClientNotes] = useState('')
+  const [isSavingNewClient, setIsSavingNewClient] = useState(false)
+
+  // Client Profile & History Modal State
+  const [selectedProfileClient, setSelectedProfileClient] = useState<any>(null)
+  const [profileName, setProfileName] = useState('')
+  const [profilePhone, setProfilePhone] = useState('')
+  const [profileNotes, setProfileNotes] = useState('')
+  const [profileAppts, setProfileAppts] = useState<any[]>([])
+  const [loadingProfileAppts, setLoadingProfileAppts] = useState(false)
+  const [isSavingProfile, setIsSavingProfile] = useState(false)
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => { setSession(session); setLoading(false) })
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => { setSession(session) })
@@ -290,7 +385,7 @@ export default function AdminDashboard() {
 
       const [apptRes, overrideRes] = await Promise.all([
         supabase.from('appointments')
-          .select('id, barber_id, appointment_date, start_time, end_time, status, is_blockout, notes, clients ( name )')
+          .select('id, barber_id, appointment_date, start_time, end_time, status, is_blockout, notes, clients ( id, name, phone, notes )')
           .eq('barber_id', selectedBarberId)
           .gte('appointment_date', startOfMonth)
           .lte('appointment_date', endOfMonth)
@@ -404,6 +499,66 @@ export default function AdminDashboard() {
     setMyServices(data || [])
   }
   useEffect(() => { if (session && activeModule === 'services' && selectedBarberId) fetchMyServices() }, [session, activeModule, selectedBarberId])
+
+  // --- CLIENT DIRECTORY AUTO-FETCH (runs when Clients tab opens OR refreshTrigger updates) ---
+  const fetchClientsDirectory = async () => {
+    if (!session) return
+    setLoadingClients(true)
+    try {
+      let allClients: any[] = []
+      const pageSize = 1000
+      let from = 0
+      while (true) {
+        const { data: batch, error: batchErr } = await supabase
+          .from('clients')
+          .select('*')
+          .neq('phone', '0000000000')
+          .order('name', { ascending: true })
+          .range(from, from + pageSize - 1)
+        if (batchErr) throw batchErr
+        if (!batch || batch.length === 0) break
+        allClients = [...allClients, ...batch]
+        if (batch.length < pageSize) break
+        from += pageSize
+      }
+
+      const [apptsRes, servicesRes] = await Promise.all([
+        supabase
+          .from('appointments')
+          .select('*')
+          .order('appointment_date', { ascending: false })
+          .order('start_time', { ascending: false })
+          .limit(5000),
+        supabase
+          .from('services')
+          .select('*')
+      ])
+
+      if (servicesRes.data) {
+        setAllShopServices(servicesRes.data)
+      }
+
+      const grouped: Record<string, any[]> = {}
+      for (const appt of apptsRes.data || []) {
+        if (appt.is_blockout || appt.status === 'blocked' || !appt.client_id) continue
+        if (!grouped[appt.client_id]) grouped[appt.client_id] = []
+        grouped[appt.client_id].push(appt)
+      }
+
+      setClientsList(allClients)
+      setAllAppointmentsByClient(grouped)
+    } catch (err) {
+      console.error('Failed to load Client Directory:', err)
+    } finally {
+      setLoadingClients(false)
+    }
+  }
+
+  useEffect(() => {
+    if (session && (activeModule === 'clients' || refreshTrigger > 0)) {
+      fetchClientsDirectory()
+    }
+  }, [session, activeModule, refreshTrigger])
 
   useEffect(() => {
     if (showBookModal && selectedBarberId && bookService && bookDate) {
@@ -548,11 +703,35 @@ export default function AdminDashboard() {
         }
       } else {
         const liveName = clientName.trim()
-        const livePhone = clientPhone.trim()
+        const livePhone = cleanPhone(clientPhone)
+        const trimmedBookingNote = bookNotes.trim()
+
+        if (livePhone.length !== 10) {
+          alert("Please enter a valid 10-digit phone number.")
+          setIsBooking(false)
+          return
+        }
+
+        // Check existing client first so we NEVER overwrite existing `clients.notes`
+        const { data: existingClient } = await supabase
+          .from('clients')
+          .select('id, name, notes')
+          .eq('phone', livePhone)
+          .maybeSingle()
+
+        const clientPayload: Record<string, any> = {
+          name: liveName,
+          phone: livePhone
+        }
+
+        if (trimmedBookingNote && (!existingClient || !existingClient.notes || !existingClient.notes.trim())) {
+          clientPayload.notes = trimmedBookingNote
+        }
+
         const { data: clientData, error: clientErr } = await supabase
           .from('clients')
-          .upsert({ name: liveName, phone: livePhone }, { onConflict: 'phone' })
-          .select('id, name')
+          .upsert(clientPayload, { onConflict: 'phone' })
+          .select('id, name, notes')
           .single()
         if (clientErr) throw clientErr
         if (!clientData?.id) throw new Error('Client record was not returned by the database.')
@@ -849,10 +1028,21 @@ export default function AdminDashboard() {
   }
 
   // --- APPOINTMENT DETAILS & CUT NOTES LOGIC ---
-  const handleOpenAppt = (appt: any) => {
+  const handleOpenAppt = async (appt: any) => {
     setSelectedAppt(appt)
     setClientNotes(appt.clients?.notes || '')
     setShowApptModal(true)
+    if (appt?.clients?.id) {
+      const { data: freshClient } = await supabase
+        .from('clients')
+        .select('id, name, phone, notes')
+        .eq('id', appt.clients.id)
+        .maybeSingle()
+      if (freshClient) {
+        setClientNotes(freshClient.notes || '')
+        setSelectedAppt((prev: any) => prev ? { ...prev, clients: freshClient } : prev)
+      }
+    }
   }
 
   const handleSaveNotes = async () => {
@@ -910,6 +1100,312 @@ export default function AdminDashboard() {
       setRefreshTrigger(prev => prev + 1)
     } catch (err) { console.error(err); alert("Failed to mark no-show.") }
     finally { setIsUpdatingAppt(false) }
+  }
+
+  // --- VAGARO CSV PARSER & BULK UPSERT UTILITY ---
+  const handleVagaroCSVUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setIsImportingCSV(true)
+    setCsvImportResult(null)
+
+    try {
+      const text = await file.text()
+      const rows = parseCSV(text)
+      if (rows.length === 0) {
+        alert("The selected CSV file is empty.")
+        return
+      }
+
+      // Dynamically locate the header row (Vagaro places a 5-row banner at the top, so headers sit on Row 6 / index 5)
+      let headerIdx = rows.findIndex(row =>
+        row.some(cell => cell.toLowerCase() === 'first name') &&
+        row.some(cell => cell.toLowerCase() === 'last name' || cell.toLowerCase() === 'mobile')
+      )
+      if (headerIdx === -1) {
+        headerIdx = rows.length > 5 ? 5 : 0
+      }
+
+      const headerRow = rows[headerIdx] || []
+      const findColIdx = (keywords: string[], fallbackIdx: number) => {
+        const idx = headerRow.findIndex(col => keywords.includes(col.trim().toLowerCase()))
+        return idx !== -1 ? idx : fallbackIdx
+      }
+
+      const firstNameIdx = findColIdx(['first name'], 0)
+      const lastNameIdx = findColIdx(['last name'], 1)
+      const emailIdx = findColIdx(['email'], 5)
+      const mobileIdx = findColIdx(['mobile', 'cell', 'phone'], 9)
+      const appBookedIdx = findColIdx(['app. booked', 'appointments booked', 'app booked'], 15)
+      const employeesSeenIdx = findColIdx(['employees seen', 'employee seen', 'staff seen'], 21)
+
+      const isInvalidText = (val: string) => {
+        const v = (val || '').trim()
+        if (!v || v === '---' || v === '--' || v.toLowerCase() === 'n/a') return true
+        if (/^\?+$/.test(v) || v.includes('???')) return true
+        return false
+      }
+
+      const parsedByPhone = new Map<string, { name: string, phone: string, notes: string }>()
+
+      for (let i = headerIdx + 1; i < rows.length; i++) {
+        const row = rows[i]
+        if (!row || row.length === 0) continue
+
+        // Strip Mobile down to a 10-digit phone number (if 11 digits starting with 1, strip leading 1)
+        const rawMobile = (row[mobileIdx] || '').trim()
+        let digits = rawMobile.replace(/\D/g, '')
+        if (digits.length === 11 && digits.startsWith('1')) {
+          digits = digits.slice(1)
+        }
+        if (digits.length !== 10 || digits === '0000000000') {
+          continue
+        }
+
+        const rawFirst = (row[firstNameIdx] || '').trim()
+        const rawLast = (row[lastNameIdx] || '').trim()
+        const rawEmail = (row[emailIdx] || '').trim()
+        const rawAppBooked = (row[appBookedIdx] || '').trim()
+        const rawEmployeesSeen = (row[employeesSeenIdx] || '').trim()
+
+        const validEmail = isInvalidText(rawEmail) ? '' : rawEmail
+        const validAppBooked = (isInvalidText(rawAppBooked) || rawAppBooked === '0') ? '' : rawAppBooked
+        const validEmployeesSeen = isInvalidText(rawEmployeesSeen) ? '' : rawEmployeesSeen
+
+        // INVALID NAME RULE: If First Name or Last Name consists of question marks (e.g., ???????), ---, or is empty,
+        // DO NOT skip the contact as long as they have a valid phone number. Assign a clean fallback name.
+        const validFirst = isInvalidText(rawFirst) ? '' : rawFirst
+        const validLast = isInvalidText(rawLast) ? '' : rawLast
+        const hasCorruptedName = isInvalidText(rawFirst) || isInvalidText(rawLast)
+
+        let cleanName = [validFirst, validLast].filter(Boolean).join(' ').trim()
+        if (!cleanName || (hasCorruptedName && !validFirst)) {
+          if (!cleanName) {
+            cleanName = validEmail ? `Unknown (${validEmail})` : 'Unknown Client'
+          }
+        }
+
+        // Build initial metadata note combining non-empty Vagaro fields
+        const metaParts: string[] = []
+        if (validEmail) metaParts.push(`Email: ${validEmail}`)
+        if (validEmployeesSeen) metaParts.push(`Barber: ${validEmployeesSeen}`)
+        if (validAppBooked) metaParts.push(`Vagaro Cuts: ${validAppBooked}`)
+        const vagaroNote = metaParts.join(' | ')
+
+        const existingInCsv = parsedByPhone.get(digits)
+        if (!existingInCsv) {
+          parsedByPhone.set(digits, {
+            name: cleanName,
+            phone: digits,
+            notes: vagaroNote
+          })
+        } else {
+          // Prefer real name over Unknown fallback if duplicated in CSV
+          const bestName = existingInCsv.name.startsWith('Unknown') && !cleanName.startsWith('Unknown')
+            ? cleanName
+            : existingInCsv.name
+          const mergedNote = existingInCsv.notes
+            ? (vagaroNote && !existingInCsv.notes.includes(vagaroNote) ? `${existingInCsv.notes} | ${vagaroNote}` : existingInCsv.notes)
+            : vagaroNote
+          parsedByPhone.set(digits, {
+            name: bestName,
+            phone: digits,
+            notes: mergedNote
+          })
+        }
+      }
+
+      const contactsToSync = Array.from(parsedByPhone.values())
+      if (contactsToSync.length === 0) {
+        alert("No valid 10-digit mobile contacts were found in this CSV.")
+        return
+      }
+
+      // Fetch existing clients in Supabase so custom barber notes are preserved/appended, never overwritten
+      let existingDbClients: any[] = []
+      const pageSize = 1000
+      let from = 0
+      while (true) {
+        const { data: batch, error: fetchErr } = await supabase
+          .from('clients')
+          .select('phone, name, notes')
+          .range(from, from + pageSize - 1)
+        if (fetchErr) throw fetchErr
+        if (!batch || batch.length === 0) break
+        existingDbClients = [...existingDbClients, ...batch]
+        if (batch.length < pageSize) break
+        from += pageSize
+      }
+
+      const existingMap = new Map<string, { name: string, notes: string | null }>()
+      for (const c of existingDbClients) {
+        if (c.phone) existingMap.set(cleanPhone(c.phone), { name: c.name, notes: c.notes })
+      }
+
+      const finalPayload = contactsToSync.map(contact => {
+        const existing = existingMap.get(contact.phone)
+        let resolvedName = contact.name
+        let resolvedNotes = contact.notes || null
+
+        if (existing) {
+          // If Supabase already has a real name and CSV has Unknown fallback, preserve the existing name
+          if (contact.name.startsWith('Unknown') && existing.name && !existing.name.startsWith('Unknown')) {
+            resolvedName = existing.name
+          }
+          // Preserve existing custom barber notes and append Vagaro metadata if not already present
+          const existingNoteTrimmed = (existing.notes || '').trim()
+          if (existingNoteTrimmed) {
+            if (contact.notes && !existingNoteTrimmed.includes(contact.notes)) {
+              resolvedNotes = `${existingNoteTrimmed} | ${contact.notes}`
+            } else {
+              resolvedNotes = existingNoteTrimmed
+            }
+          }
+        }
+
+        return {
+          name: resolvedName,
+          phone: contact.phone,
+          notes: resolvedNotes
+        }
+      })
+
+      // Bulk-upsert in batches of 150 matching on `phone`
+      const batchSize = 150
+      for (let i = 0; i < finalPayload.length; i += batchSize) {
+        const chunk = finalPayload.slice(i, i + batchSize)
+        const { error: upsertErr } = await supabase
+          .from('clients')
+          .upsert(chunk, { onConflict: 'phone' })
+        if (upsertErr) throw upsertErr
+      }
+
+      setCsvImportResult(`Successfully imported & synced ${finalPayload.length} Vagaro client profiles.`)
+      setRefreshTrigger(prev => prev + 1)
+    } catch (err: any) {
+      console.error("Vagaro CSV Import failed:", err)
+      alert(`Failed to import Vagaro CSV: ${err?.message || 'Unknown error'}`)
+    } finally {
+      setIsImportingCSV(false)
+      if (csvFileInputRef.current) {
+        csvFileInputRef.current.value = ''
+      }
+    }
+  }
+
+  // --- MANUAL ADD CLIENT & CLIENT PROFILE MODAL HANDLERS ---
+  const handleAddManualClient = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const liveName = newClientName.trim()
+    const livePhone = cleanPhone(newClientPhone)
+    const liveNotes = newClientNotes.trim()
+
+    if (!liveName || livePhone.length !== 10) {
+      alert("Please provide a client name and a valid 10-digit phone number.")
+      return
+    }
+
+    setIsSavingNewClient(true)
+    try {
+      const { data: existing } = await supabase
+        .from('clients')
+        .select('id, notes')
+        .eq('phone', livePhone)
+        .maybeSingle()
+
+      let mergedNotes: string | null = liveNotes || null
+      if (existing?.notes && existing.notes.trim()) {
+        mergedNotes = liveNotes && !existing.notes.includes(liveNotes)
+          ? `${existing.notes.trim()} | ${liveNotes}`
+          : existing.notes.trim()
+      }
+
+      const { error } = await supabase
+        .from('clients')
+        .upsert({ name: liveName, phone: livePhone, notes: mergedNotes }, { onConflict: 'phone' })
+      if (error) throw error
+
+      setShowAddClientModal(false)
+      setNewClientName('')
+      setNewClientPhone('')
+      setNewClientNotes('')
+      setRefreshTrigger(prev => prev + 1)
+    } catch (err: any) {
+      console.error("Failed to add client:", err)
+      alert(`Failed to save client: ${err?.message || 'Database error'}`)
+    } finally {
+      setIsSavingNewClient(false)
+    }
+  }
+
+  const handleOpenClientProfile = async (client: any) => {
+    setSelectedProfileClient(client)
+    setProfileName(client.name || '')
+    setProfilePhone(formatPhoneNumber(client.phone || ''))
+    setProfileNotes(client.notes || '')
+
+    const cachedAppts = allAppointmentsByClient[client.id] || []
+    setProfileAppts(cachedAppts)
+    setLoadingProfileAppts(true)
+
+    try {
+      const { data: freshAppts, error } = await supabase
+        .from('appointments')
+        .select('*')
+        .eq('client_id', client.id)
+        .order('appointment_date', { ascending: false })
+        .order('start_time', { ascending: false })
+      if (!error && freshAppts) {
+        const validAppts = freshAppts.filter(a => !a.is_blockout && a.status !== 'blocked')
+        setProfileAppts(validAppts)
+      }
+    } catch (err) {
+      console.error("Failed to fetch client appointment history:", err)
+    } finally {
+      setLoadingProfileAppts(false)
+    }
+  }
+
+  const handleSaveClientProfile = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!selectedProfileClient?.id) return
+
+    const updatedName = profileName.trim()
+    const updatedPhone = cleanPhone(profilePhone)
+    const updatedNotes = profileNotes.trim()
+
+    if (!updatedName || updatedPhone.length !== 10) {
+      alert("Please enter a valid client name and 10-digit phone number.")
+      return
+    }
+
+    setIsSavingProfile(true)
+    try {
+      const { error } = await supabase
+        .from('clients')
+        .update({
+          name: updatedName,
+          phone: updatedPhone,
+          notes: updatedNotes || null
+        })
+        .eq('id', selectedProfileClient.id)
+
+      if (error) throw error
+
+      setSelectedProfileClient((prev: any) => prev ? {
+        ...prev,
+        name: updatedName,
+        phone: updatedPhone,
+        notes: updatedNotes || null
+      } : null)
+      setRefreshTrigger(prev => prev + 1)
+      alert("Client profile saved!")
+    } catch (err: any) {
+      console.error("Failed to update client profile:", err)
+      alert(`Failed to update client profile: ${err?.message || 'Database error'}`)
+    } finally {
+      setIsSavingProfile(false)
+    }
   }
 
   // --- SERVICES LOGIC ---
@@ -1492,34 +1988,43 @@ export default function AdminDashboard() {
       {/* APPOINTMENT DETAILS & CUT NOTES MODAL */}
       {showApptModal && selectedAppt && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
-           <div className="bg-[var(--color-brand-800)] w-full max-w-md rounded-2xl flex flex-col border border-[var(--color-brand-700)] shadow-2xl overflow-hidden">
-              <div className="flex items-center justify-between p-6 border-b border-[var(--color-brand-700)]">
+           <div className="bg-[var(--color-brand-800)] w-full max-w-md rounded-2xl flex flex-col border border-[var(--color-brand-700)] shadow-2xl overflow-hidden max-h-[90vh]">
+              <div className="flex items-center justify-between p-6 border-b border-[var(--color-brand-700)] flex-shrink-0">
                 <div>
                   <h2 className="text-xl font-bold">
                     {selectedAppt.is_blockout ? (selectedAppt.notes || 'Blocked Time') : selectedAppt.clients?.name || 'Walk-In'}
                   </h2>
-                  <p className="text-sm text-[var(--color-brand-accent)]">{formatTime(selectedAppt.start_time)} - {formatTime(selectedAppt.end_time)}</p>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <p className="text-sm text-[var(--color-brand-accent)] font-semibold">
+                      {formatTime(selectedAppt.start_time)} - {formatTime(selectedAppt.end_time)}
+                    </p>
+                    {!selectedAppt.is_blockout && selectedAppt.clients?.phone && selectedAppt.clients.phone !== '0000000000' && (
+                      <span className="text-xs text-[var(--color-brand-muted)] font-mono">
+                        • {formatPhoneNumber(selectedAppt.clients.phone)}
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <button onClick={() => setShowApptModal(false)} className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer"><X className="w-6 h-6" /></button>
               </div>
 
-              <div className="p-6 space-y-6">
+              <div className="p-6 space-y-5 overflow-y-auto flex-1">
                  {/* Contact Buttons */}
                  {!selectedAppt.is_blockout && selectedAppt.clients?.phone && selectedAppt.clients.phone !== '0000000000' && (
                    <div className="flex gap-3">
-                     <a href={`tel:${selectedAppt.clients.phone}`} className="flex-1 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-center py-3 rounded-xl font-bold hover:border-[var(--color-brand-accent)] transition-colors flex items-center justify-center gap-2 cursor-pointer">
-                       <Phone className="w-4 h-4" /> Call
+                     <a href={`tel:${cleanPhone(selectedAppt.clients.phone)}`} className="flex-1 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-center py-3 rounded-xl font-bold hover:border-[var(--color-brand-accent)] transition-colors flex items-center justify-center gap-2 cursor-pointer">
+                       <Phone className="w-4 h-4 text-[var(--color-brand-accent)]" /> Call
                      </a>
-                     <a href={`sms:${selectedAppt.clients.phone}`} className="flex-1 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-center py-3 rounded-xl font-bold hover:border-[var(--color-brand-accent)] transition-colors flex items-center justify-center gap-2 cursor-pointer">
-                       <MessageSquare className="w-4 h-4" /> Text
+                     <a href={`sms:${cleanPhone(selectedAppt.clients.phone)}`} className="flex-1 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-center py-3 rounded-xl font-bold hover:border-[var(--color-brand-accent)] transition-colors flex items-center justify-center gap-2 cursor-pointer">
+                       <MessageSquare className="w-4 h-4 text-[var(--color-brand-accent)]" /> Text
                      </a>
                    </div>
                  )}
 
-                 {/* Appointment Booking Notes / Reason */}
+                 {/* Appointment-Specific Booking Notes (appointments.notes) */}
                  <div className="space-y-2">
                    <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider">
-                     {selectedAppt.is_blockout ? 'Blockout Reason' : 'Client Notes'}
+                     {selectedAppt.is_blockout ? 'Blockout Reason' : 'Appointment Booking Notes'}
                    </label>
                    {selectedAppt.notes ? (
                      <div className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-white text-sm rounded-xl p-3">
@@ -1527,27 +2032,44 @@ export default function AdminDashboard() {
                      </div>
                    ) : (
                      <div className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-[var(--color-brand-muted)] text-sm rounded-xl p-3 italic">
-                       {selectedAppt.is_blockout ? 'No reason specified.' : 'No special notes provided.'}
+                       {selectedAppt.is_blockout ? 'No reason specified.' : 'No appointment-specific booking notes provided.'}
                      </div>
                    )}
                  </div>
 
-                 {/* Cut Notes (Clients only) */}
+                 {/* Persistent Client Cut Notes (clients.notes) */}
                  {!selectedAppt.is_blockout && (
                    <div className="space-y-2">
-                     <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider">Client Cut Notes</label>
+                     <div className="flex items-center justify-between">
+                       <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider">
+                         Persistent Client Cut Notes
+                       </label>
+                       {selectedAppt.clients?.id && selectedAppt.clients?.phone !== '0000000000' && (
+                         <button
+                           type="button"
+                           onClick={() => {
+                             const clientObj = selectedAppt.clients
+                             setShowApptModal(false)
+                             handleOpenClientProfile(clientObj)
+                           }}
+                           className="text-xs font-bold text-[var(--color-brand-accent)] hover:underline cursor-pointer"
+                         >
+                           View Full Profile & History →
+                         </button>
+                       )}
+                     </div>
                      <textarea
                        value={clientNotes}
                        onChange={(e) => setClientNotes(e.target.value)}
                        placeholder="e.g. #2 high fade, finger length on top..."
-                       className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-white rounded-xl p-3 h-28 outline-none focus:border-[var(--color-brand-accent)] resize-none"
+                       className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-white rounded-xl p-3 h-28 outline-none focus:border-[var(--color-brand-accent)] resize-none text-sm"
                      />
                      <button
                        onClick={handleSaveNotes}
                        disabled={isUpdatingAppt || clientNotes === (selectedAppt.clients?.notes || '')}
-                       className="w-full bg-[var(--color-brand-700)] hover:bg-[var(--color-brand-600)] text-white font-bold py-3 rounded-lg transition-colors disabled:opacity-50 cursor-pointer"
+                       className="w-full bg-[var(--color-brand-accent)] hover:brightness-110 text-white font-bold py-3 rounded-xl transition-all disabled:opacity-50 cursor-pointer shadow-sm"
                      >
-                       Save Notes
+                       {isUpdatingAppt ? 'Saving...' : 'Save Cut Notes'}
                      </button>
                    </div>
                  )}
@@ -1993,6 +2515,288 @@ export default function AdminDashboard() {
 
               </div>
            </div>
+        </div>
+      )}
+
+      {/* MANUAL ADD CLIENT MODAL */}
+      {showAddClientModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
+          <div className="bg-[var(--color-brand-800)] w-full max-w-md rounded-2xl flex flex-col border border-[var(--color-brand-700)] shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between p-6 border-b border-[var(--color-brand-700)]">
+              <div>
+                <h2 className="text-xl font-bold flex items-center gap-2">
+                  <Plus className="w-5 h-5 text-[var(--color-brand-accent)]" />
+                  Add New Client
+                </h2>
+                <p className="text-xs text-[var(--color-brand-muted)] mt-0.5">
+                  Create or sync a client record in your directory
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setShowAddClientModal(false)
+                  setNewClientName('')
+                  setNewClientPhone('')
+                  setNewClientNotes('')
+                }}
+                className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+
+            <form onSubmit={handleAddManualClient} className="p-6 space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">
+                  Client Name
+                </label>
+                <div className="relative">
+                  <User className="w-4 h-4 text-[var(--color-brand-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    required
+                    placeholder="First & Last Name"
+                    value={newClientName}
+                    onChange={(e) => setNewClientName(e.target.value)}
+                    className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-[var(--color-brand-accent)]"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">
+                  Phone Number (10 Digits)
+                </label>
+                <div className="relative">
+                  <Phone className="w-4 h-4 text-[var(--color-brand-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="tel"
+                    required
+                    placeholder="(509) 555-1234"
+                    value={newClientPhone}
+                    onChange={(e) => setNewClientPhone(e.target.value)}
+                    className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-[var(--color-brand-accent)]"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">
+                  Persistent Cut Notes (Optional)
+                </label>
+                <div className="relative">
+                  <FileText className="w-4 h-4 text-[var(--color-brand-muted)] absolute left-3 top-3.5" />
+                  <textarea
+                    placeholder="e.g. #1.5 mid skin fade, hard part on left..."
+                    value={newClientNotes}
+                    onChange={(e) => setNewClientNotes(e.target.value)}
+                    rows={3}
+                    className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-[var(--color-brand-accent)] resize-none text-sm"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSavingNewClient || !newClientName.trim() || !newClientPhone.trim()}
+                className="w-full bg-[var(--color-brand-accent)] text-white font-bold p-3.5 rounded-xl mt-2 cursor-pointer disabled:opacity-50 hover:brightness-110 transition-all shadow-md"
+              >
+                {isSavingNewClient ? 'Saving Client...' : 'Save Client'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* CLIENT PROFILE & HISTORY MODAL */}
+      {selectedProfileClient && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
+          <div className="bg-[var(--color-brand-800)] w-full max-w-2xl rounded-2xl flex flex-col border border-[var(--color-brand-700)] shadow-2xl overflow-hidden max-h-[90vh]">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between p-5 sm:p-6 border-b border-[var(--color-brand-700)] flex-shrink-0">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-11 h-11 rounded-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] flex items-center justify-center text-[var(--color-brand-accent)] font-bold text-lg flex-shrink-0">
+                  {(selectedProfileClient.name || 'C').charAt(0).toUpperCase()}
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-xl font-bold text-white truncate">
+                    {selectedProfileClient.name}
+                  </h2>
+                  <p className="text-xs sm:text-sm text-[var(--color-brand-accent)] font-mono">
+                    {formatPhoneNumber(selectedProfileClient.phone)} • {profileAppts.length} {profileAppts.length === 1 ? 'Appointment' : 'Appointments'}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setSelectedProfileClient(null)}
+                className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer p-1"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+
+            {/* Modal Scrollable Body */}
+            <div className="p-5 sm:p-6 space-y-6 overflow-y-auto flex-1">
+              {/* Quick Call / Text Actions */}
+              {selectedProfileClient.phone && selectedProfileClient.phone !== '0000000000' && (
+                <div className="flex gap-3">
+                  <a
+                    href={`tel:${cleanPhone(selectedProfileClient.phone)}`}
+                    className="flex-1 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-center py-2.5 rounded-xl text-sm font-bold hover:border-[var(--color-brand-accent)] transition-colors flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <Phone className="w-4 h-4 text-[var(--color-brand-accent)]" /> Call Client
+                  </a>
+                  <a
+                    href={`sms:${cleanPhone(selectedProfileClient.phone)}`}
+                    className="flex-1 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-center py-2.5 rounded-xl text-sm font-bold hover:border-[var(--color-brand-accent)] transition-colors flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <MessageSquare className="w-4 h-4 text-[var(--color-brand-accent)]" /> Text Client
+                  </a>
+                </div>
+              )}
+
+              {/* Editable Profile Form */}
+              <form onSubmit={handleSaveClientProfile} className="bg-[var(--color-brand-900)]/90 border border-[var(--color-brand-700)] rounded-xl p-4 sm:p-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider flex items-center gap-1.5">
+                    <User className="w-3.5 h-3.5 text-[var(--color-brand-accent)]" />
+                    Client Profile & Persistent Cut Notes
+                  </h3>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                  <div>
+                    <label className="block text-[11px] font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1">
+                      Full Name
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={profileName}
+                      onChange={(e) => setProfileName(e.target.value)}
+                      className="w-full bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-lg p-2.5 text-sm text-white outline-none focus:border-[var(--color-brand-accent)]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1">
+                      Phone Number
+                    </label>
+                    <input
+                      type="tel"
+                      required
+                      value={profilePhone}
+                      onChange={(e) => setProfilePhone(e.target.value)}
+                      className="w-full bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-lg p-2.5 text-sm text-white font-mono outline-none focus:border-[var(--color-brand-accent)]"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1">
+                    Persistent Cut Notes (Guard Sizes, Formula, Vagaro Metadata)
+                  </label>
+                  <textarea
+                    value={profileNotes}
+                    onChange={(e) => setProfileNotes(e.target.value)}
+                    placeholder="Add persistent cut notes, guard preferences, or client details..."
+                    rows={3}
+                    className="w-full bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-lg p-3 text-sm text-white outline-none focus:border-[var(--color-brand-accent)] resize-none"
+                  />
+                </div>
+
+                <div className="flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={isSavingProfile}
+                    className="bg-[var(--color-brand-accent)] text-white font-bold px-5 py-2.5 rounded-xl text-xs sm:text-sm hover:brightness-110 transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2 shadow-md"
+                  >
+                    <Save className="w-4 h-4" />
+                    {isSavingProfile ? 'Saving Changes...' : 'Save Profile & Notes'}
+                  </button>
+                </div>
+              </form>
+
+              {/* Chronological Appointment History */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider flex items-center gap-1.5">
+                    <History className="w-4 h-4 text-[var(--color-brand-accent)]" />
+                    Appointment History ({profileAppts.length})
+                  </h3>
+                </div>
+
+                {loadingProfileAppts ? (
+                  <div className="text-center py-8 text-sm text-[var(--color-brand-muted)] animate-pulse bg-[var(--color-brand-900)] rounded-xl border border-[var(--color-brand-700)]">
+                    Loading chronological history...
+                  </div>
+                ) : profileAppts.length === 0 ? (
+                  <div className="text-center py-8 text-sm text-[var(--color-brand-muted)] bg-[var(--color-brand-900)] rounded-xl border border-dashed border-[var(--color-brand-700)]">
+                    No appointments recorded in the PWA for this client yet.
+                  </div>
+                ) : (
+                  <div className="space-y-2.5">
+                    {profileAppts.map((appt) => {
+                      const barberObj = barbers.find(b => b.id === appt.barber_id)
+                      const serviceObj = allShopServices.find(s => s.id === appt.service_id)
+                      const statusBadge = appt.status === 'cancelled'
+                        ? 'bg-red-950/80 text-red-300 border-red-800/60'
+                        : appt.status === 'no-show'
+                        ? 'bg-orange-950/80 text-orange-300 border-orange-800/60'
+                        : appt.status === 'completed'
+                        ? 'bg-emerald-950/80 text-emerald-300 border-emerald-800/60'
+                        : appt.status === 'walk-in'
+                        ? 'bg-amber-950/80 text-amber-300 border-amber-800/60'
+                        : 'bg-[var(--color-brand-accent)]/15 text-[var(--color-brand-accent)] border-[var(--color-brand-accent)]/40'
+
+                      return (
+                        <div
+                          key={appt.id}
+                          className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3.5 flex flex-col gap-2"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-sm text-white">
+                                {formatDisplayDate(appt.appointment_date)}, {appt.appointment_date?.split('-')[0]}
+                              </span>
+                              <span className="text-xs font-semibold text-[var(--color-brand-accent)]">
+                                {formatTime(appt.start_time)} – {formatTime(appt.end_time)}
+                              </span>
+                            </div>
+                            <span className={`text-[10px] font-bold uppercase px-2.5 py-0.5 rounded-full border ${statusBadge}`}>
+                              {appt.status || 'booked'}
+                            </span>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--color-brand-muted)]">
+                            <span className="flex items-center gap-1">
+                              <Scissors className="w-3.5 h-3.5 text-[var(--color-brand-accent)]" />
+                              <strong className="text-white">{serviceObj?.name || (appt.status === 'walk-in' ? 'Walk-In Service' : 'Haircut / Service')}</strong>
+                            </span>
+                            <span className="flex items-center gap-1">
+                              <User className="w-3.5 h-3.5 text-[var(--color-brand-accent)]" />
+                              Barber: <strong className="text-white">{barberObj?.name || 'Shop Barber'}</strong>
+                            </span>
+                          </div>
+
+                          {appt.notes && (
+                            <div className="bg-[var(--color-brand-800)] border border-[var(--color-brand-700)]/80 rounded-lg p-2.5 text-xs text-[var(--color-brand-light)] flex items-start gap-2 mt-0.5">
+                              <FileText className="w-3.5 h-3.5 text-[var(--color-brand-accent)] flex-shrink-0 mt-0.5" />
+                              <div>
+                                <span className="font-bold text-[var(--color-brand-muted)] uppercase text-[10px] block mb-0.5">
+                                  Appointment Booking Note:
+                                </span>
+                                {appt.notes}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </>
@@ -2577,16 +3381,205 @@ export default function AdminDashboard() {
           </div>
         )}
 
-        {/* --- 4. CLIENTS UI (Placeholder for Phase 7) --- */}
-        {activeModule === 'clients' && (
-          <div className="bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-2xl p-8 text-center animate-in fade-in">
-            <button onClick={() => setActiveModule('home')} className="mb-4 text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] flex items-center justify-center gap-2 mx-auto transition-colors cursor-pointer">
-              <ArrowLeft className="w-4 h-4" /> Back to Dashboard
-            </button>
-            <p className="text-lg font-bold">Client Directory</p>
-            <p className="text-sm text-[var(--color-brand-muted)] mt-2">Module Under Construction for Phase 7 (Vagaro CSV Cutover)</p>
-          </div>
-        )}
+        {/* --- 4. CLIENT DIRECTORY CRM & VAGARO CSV IMPORTER --- */}
+        {activeModule === 'clients' && (() => {
+          const q = clientSearch.trim().toLowerCase()
+          const qDigits = cleanPhone(clientSearch)
+
+          const filteredClients = clientsList.filter((client) => {
+            if (!q) return true
+            const nameMatch = (client.name || '').toLowerCase().includes(q)
+            const rawPhone = cleanPhone(client.phone || '')
+            const fmtPhone = formatPhoneNumber(client.phone || '').toLowerCase()
+            const phoneMatch = fmtPhone.includes(q) || (qDigits.length > 0 && rawPhone.includes(qDigits))
+            const notesMatch = (client.notes || '').toLowerCase().includes(q)
+            return nameMatch || phoneMatch || notesMatch
+          })
+
+          const displayedClients = filteredClients.slice(0, visibleClientCount)
+
+          return (
+            <div className="bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-2xl p-4 sm:p-6 shadow-xl animate-in fade-in space-y-6">
+              {/* Hidden CSV File Input */}
+              <input
+                ref={csvFileInputRef}
+                type="file"
+                accept=".csv"
+                onChange={handleVagaroCSVUpload}
+                className="hidden"
+              />
+
+              {/* Top Header & Actions */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => setActiveModule('home')}
+                    className="p-2 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-full hover:border-[var(--color-brand-accent)] transition-colors cursor-pointer"
+                  >
+                    <ArrowLeft className="w-5 h-5" />
+                  </button>
+                  <div>
+                    <div className="flex items-center gap-2.5">
+                      <h2 className="text-xl font-bold">Client Directory</h2>
+                      <span className="text-xs font-bold bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-[var(--color-brand-accent)] px-2.5 py-0.5 rounded-full">
+                        {clientsList.length}
+                      </span>
+                    </div>
+                    <p className="text-sm text-[var(--color-brand-muted)]">
+                      Persistent cut notes, appointment history & Vagaro CRM sync
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <button
+                    type="button"
+                    disabled={isImportingCSV}
+                    onClick={() => csvFileInputRef.current?.click()}
+                    className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] text-[var(--color-brand-light)] px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    <Upload className="w-4 h-4 text-[var(--color-brand-accent)]" />
+                    <span>{isImportingCSV ? 'Importing CSV...' : 'Import Vagaro CSV'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowAddClientModal(true)}
+                    className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 bg-[var(--color-brand-accent)] text-white px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold hover:brightness-110 transition-all cursor-pointer shadow-md"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>+ Add Client</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* CSV Import Status Banner */}
+              {csvImportResult && (
+                <div className="bg-[var(--color-brand-900)] border border-[var(--color-brand-accent)]/60 rounded-xl p-3.5 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 text-xs sm:text-sm text-white font-semibold">
+                    <CheckCircle2 className="w-4 h-4 text-[var(--color-brand-accent)] flex-shrink-0" />
+                    <span>{csvImportResult}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCsvImportResult(null)}
+                    className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
+
+              {/* Real-Time Search Bar */}
+              <div className="relative">
+                <Search className="w-4 h-4 text-[var(--color-brand-muted)] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  placeholder="Search clients by name, phone number, or cut notes..."
+                  value={clientSearch}
+                  onChange={(e) => {
+                    setClientSearch(e.target.value)
+                    setVisibleClientCount(100)
+                  }}
+                  className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] focus:border-[var(--color-brand-accent)] rounded-xl py-3 pl-10 pr-10 text-sm text-white outline-none transition-colors"
+                />
+                {clientSearch && (
+                  <button
+                    type="button"
+                    onClick={() => setClientSearch('')}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--color-brand-muted)] hover:text-white cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+
+              {/* Client List */}
+              {loadingClients && clientsList.length === 0 ? (
+                <div className="text-center py-12 text-[var(--color-brand-muted)] animate-pulse bg-[var(--color-brand-900)] rounded-xl border border-[var(--color-brand-700)]">
+                  Loading client directory...
+                </div>
+              ) : filteredClients.length === 0 ? (
+                <div className="text-center py-12 text-[var(--color-brand-muted)] bg-[var(--color-brand-900)] rounded-xl border border-dashed border-[var(--color-brand-700)] p-6">
+                  <Users className="w-8 h-8 text-[var(--color-brand-muted)] mx-auto mb-2 opacity-60" />
+                  <p className="font-bold text-white text-sm">
+                    {clientSearch ? 'No matching clients found' : 'No clients in directory yet'}
+                  </p>
+                  <p className="text-xs mt-1">
+                    {clientSearch
+                      ? 'Try searching a different name, phone digit, or note keyword.'
+                      : 'Import your Vagaro CSV or tap "+ Add Client" to add your first client.'}
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {displayedClients.map((client) => {
+                    const clientAppts = allAppointmentsByClient[client.id] || []
+                    const apptCount = clientAppts.length
+
+                    return (
+                      <button
+                        key={client.id}
+                        type="button"
+                        onClick={() => handleOpenClientProfile(client)}
+                        className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] rounded-xl p-4 text-left transition-all cursor-pointer group flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-sm"
+                      >
+                        <div className="flex items-start gap-3.5 min-w-0 flex-1">
+                          <div className="w-10 h-10 rounded-full bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] group-hover:border-[var(--color-brand-accent)] flex items-center justify-center text-[var(--color-brand-accent)] font-bold text-sm flex-shrink-0 mt-0.5 transition-colors">
+                            {(client.name || 'C').charAt(0).toUpperCase()}
+                          </div>
+
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                              <h3 className="font-bold text-base text-white group-hover:text-[var(--color-brand-accent)] transition-colors truncate">
+                                {client.name}
+                              </h3>
+                              <span className="text-xs font-mono text-[var(--color-brand-muted)] bg-[var(--color-brand-800)] px-2 py-0.5 rounded border border-[var(--color-brand-700)]">
+                                {formatPhoneNumber(client.phone)}
+                              </span>
+                            </div>
+
+                            {client.notes ? (
+                              <p className="text-xs text-[var(--color-brand-muted)] mt-1.5 line-clamp-2 flex items-start gap-1.5">
+                                <FileText className="w-3.5 h-3.5 text-[var(--color-brand-accent)] flex-shrink-0 mt-0.5" />
+                                <span className="truncate">{client.notes}</span>
+                              </p>
+                            ) : (
+                              <p className="text-xs text-[var(--color-brand-muted)]/50 italic mt-1">
+                                No persistent cut notes yet — tap to add notes
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between sm:justify-end gap-3 border-t sm:border-t-0 border-[var(--color-brand-700)]/60 pt-2.5 sm:pt-0 flex-shrink-0">
+                          <span className="text-xs font-bold px-2.5 py-1 rounded-lg bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] text-[var(--color-brand-accent)]">
+                            {apptCount} {apptCount === 1 ? 'Appt' : 'Appts'}
+                          </span>
+                          <span className="text-xs font-bold text-[var(--color-brand-muted)] group-hover:text-white transition-colors">
+                            Profile →
+                          </span>
+                        </div>
+                      </button>
+                    )
+                  })}
+
+                  {filteredClients.length > visibleClientCount && (
+                    <div className="pt-2 text-center">
+                      <button
+                        type="button"
+                        onClick={() => setVisibleClientCount((prev) => prev + 100)}
+                        className="px-5 py-2.5 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] rounded-xl text-xs font-bold text-[var(--color-brand-light)] cursor-pointer transition-colors"
+                      >
+                        Show More Clients ({filteredClients.length - visibleClientCount} remaining)
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )
+        })()}
 
       </div>
 

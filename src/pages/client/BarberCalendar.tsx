@@ -31,6 +31,17 @@ function formatTime(timeStr: string) {
     return `${h}:${mins.toString().padStart(2, '0')} ${ampm}`
 }
 
+function cleanPhone(raw: string): string {
+    const digits = (raw || '').replace(/\D/g, '')
+    if (digits.length === 11 && digits.startsWith('1')) {
+        return digits.slice(1)
+    }
+    if (digits.length > 10) {
+        return digits.slice(-10)
+    }
+    return digits
+}
+
 export default function BarberCalendar() {
     const { barberId } = useParams()
     const navigate = useNavigate()
@@ -141,18 +152,41 @@ export default function BarberCalendar() {
     const handleBooking = async (e: React.FormEvent) => {
         e.preventDefault()
         if (!clientName || !clientPhone || !selectedSlot) return
+
+        const liveName = clientName.trim()
+        const livePhone = cleanPhone(clientPhone)
+        const trimmedNotes = notes.trim()
+
+        if (livePhone.length !== 10) {
+            alert('Please enter a valid 10-digit phone number.')
+            return
+        }
+
         setIsSubmitting(true)
 
         try {
             // --- STEP A: Write the LIVE form state into `clients` and get its real id back ---
-            // `clients.phone` is UNIQUE, so a plain insert would 409 for a returning client.
-            // Upsert on phone inserts new clients and overwrites the name on existing ones — never a stale name.
-            const liveName = clientName.trim()
-            const livePhone = clientPhone.trim()
+            // `clients.phone` is UNIQUE (cleaned 10-digit string).
+            // Check existing client first so we NEVER overwrite existing `clients.notes`.
+            const { data: existingClient } = await supabase
+                .from('clients')
+                .select('id, name, notes')
+                .eq('phone', livePhone)
+                .maybeSingle()
+
+            const clientPayload: Record<string, any> = {
+                name: liveName,
+                phone: livePhone
+            }
+
+            if (trimmedNotes && (!existingClient || !existingClient.notes || !existingClient.notes.trim())) {
+                clientPayload.notes = trimmedNotes
+            }
+
             const { data: clientData, error: clientErr } = await supabase
                 .from('clients')
-                .upsert({ name: liveName, phone: livePhone }, { onConflict: 'phone' })
-                .select('id, name')
+                .upsert(clientPayload, { onConflict: 'phone' })
+                .select('id, name, notes')
                 .single()
             if (clientErr) throw clientErr
             if (!clientData?.id) throw new Error('Client record was not returned by the database.')
@@ -209,15 +243,20 @@ export default function BarberCalendar() {
             }
 
             // --- STEP B: Use the freshly returned client id — nothing cached, nothing hardcoded ---
-            const { error: apptErr } = await supabase.from('appointments').insert({
+            const apptInsertPayload: Record<string, any> = {
                 barber_id: selectedSlot.barberId,
                 client_id: clientData.id,
                 appointment_date: selectedDate,
                 start_time: startTimeStr,
                 end_time: endTimeStr,
                 status: isWalkIn ? 'walk-in' : 'booked', // Automatically tag iPad lobby bookings as Walk-Ins
-                notes: notes.trim() || null
-            })
+                notes: trimmedNotes || null
+            }
+            if (selectedService?.id) {
+                apptInsertPayload.service_id = selectedService.id
+            }
+
+            const { error: apptErr } = await supabase.from('appointments').insert(apptInsertPayload)
             if (apptErr) throw apptErr
 
             try {
