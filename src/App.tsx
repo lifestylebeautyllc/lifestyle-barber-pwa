@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react'
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
 import BookingWizard from './pages/client/BookingWizard'
 import BarberCalendar from './pages/client/BarberCalendar'
@@ -45,9 +46,36 @@ const ParticleBackground = () => {
 }
 
 export default function App() {
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    const saved = typeof window !== 'undefined' ? localStorage.getItem('lifestyle_theme') : null
+    return saved === 'light' ? 'light' : 'dark'
+  })
+
+  useEffect(() => {
+    const syncTheme = () => {
+      const saved = localStorage.getItem('lifestyle_theme')
+      const nextTheme = saved === 'light' ? 'light' : 'dark'
+      setTheme(nextTheme)
+      if (nextTheme === 'light') {
+        document.documentElement.classList.add('light')
+      } else {
+        document.documentElement.classList.remove('light')
+      }
+    }
+
+    syncTheme()
+
+    window.addEventListener('lifestyle-theme-change', syncTheme)
+    window.addEventListener('storage', syncTheme)
+    return () => {
+      window.removeEventListener('lifestyle-theme-change', syncTheme)
+      window.removeEventListener('storage', syncTheme)
+    }
+  }, [])
+
   return (
     <Router>
-      <ParticleBackground />
+      {theme !== 'light' && <ParticleBackground />}
       <Routes>
         {/* Public Client Booking Flow */}
         <Route path="/" element={<BookingWizard />} />

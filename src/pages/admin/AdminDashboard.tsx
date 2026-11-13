@@ -1,7 +1,15 @@
 import { useState, useEffect, useRef } from 'react'
-import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, UserX, Trash2, FileText, Clock, Ban, Search, Upload, History, CheckCircle2 } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, UserX, Trash2, FileText, Clock, Ban, Search, Upload, History, CheckCircle2, Sun, Moon, ExternalLink, Delete } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { getAvailableSlots, getDayOfWeekFromDateString, getBarberDaySchedule, minutesToTime, DAYS_OF_WEEK, DEFAULT_WORKING_HOURS, type DaySchedule } from '../../lib/slotEngine'
+
+const SHOP_AUTH_EMAIL = 'm.angelocantu@gmail.com'
+const ACTIVE_BARBER_STORAGE_KEY = 'lifestyle_active_barber_id'
+const PIN_ATTEMPTS_STORAGE_KEY = 'lifestyle_pin_attempts'
+const PIN_LOCK_STORAGE_KEY = 'lifestyle_pin_lock_until'
+const MAX_PIN_ATTEMPTS = 5
+const PIN_COOLDOWN_MS = 60_000
 
 // --- HELPER FUNCTIONS ---
 function cleanPhone(raw: string): string {
@@ -130,10 +138,50 @@ type WalkInSlot = { time: string, barberId: string, barberName: string }
 
 export default function AdminDashboard() {
   const [session, setSession] = useState<any>(null)
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
+  const [pin, setPin] = useState('')
+  const [isAuthenticating, setIsAuthenticating] = useState(false)
   const [loading, setLoading] = useState(true)
   const [authError, setAuthError] = useState('')
+  const [failedPinAttempts, setFailedPinAttempts] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem(PIN_ATTEMPTS_STORAGE_KEY)
+      return saved ? parseInt(saved, 10) || 0 : 0
+    } catch { return 0 }
+  })
+  const [pinLockUntil, setPinLockUntil] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem(PIN_LOCK_STORAGE_KEY)
+      const ts = saved ? parseInt(saved, 10) || 0 : 0
+      return ts > Date.now() ? ts : 0
+    } catch { return 0 }
+  })
+  const [cooldownSeconds, setCooldownSeconds] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem(PIN_LOCK_STORAGE_KEY)
+      const ts = saved ? parseInt(saved, 10) || 0 : 0
+      return ts > Date.now() ? Math.ceil((ts - Date.now()) / 1000) : 0
+    } catch { return 0 }
+  })
+  const [isLight, setIsLight] = useState<boolean>(() =>
+    typeof document !== 'undefined' && document.documentElement.classList.contains('light')
+  )
+  const pinInputRef = useRef<HTMLInputElement | null>(null)
+
+  const toggleTheme = () => {
+    const nextIsLight = document.documentElement.classList.toggle('light')
+    try {
+      localStorage.setItem('lifestyle_theme', nextIsLight ? 'light' : 'dark')
+    } catch {}
+    setIsLight(nextIsLight)
+    window.dispatchEvent(new Event('lifestyle-theme-change'))
+  }
+
+  const selectActiveBarber = (barberId: string) => {
+    setSelectedBarberId(barberId)
+    try {
+      localStorage.setItem(ACTIVE_BARBER_STORAGE_KEY, barberId)
+    } catch {}
+  }
 
   const [activeModule, setActiveModule] = useState<'home' | 'calendar' | 'walkin' | 'clients' | 'services'>('home')
   const [barbers, setBarbers] = useState<any[]>([])
@@ -269,6 +317,43 @@ export default function AdminDashboard() {
     }
   }, [])
 
+  useEffect(() => {
+    const syncTheme = () => {
+      setIsLight(document.documentElement.classList.contains('light'))
+    }
+    window.addEventListener('lifestyle-theme-change', syncTheme)
+    window.addEventListener('storage', syncTheme)
+    return () => {
+      window.removeEventListener('lifestyle-theme-change', syncTheme)
+      window.removeEventListener('storage', syncTheme)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!pinLockUntil) {
+      setCooldownSeconds(0)
+      return
+    }
+    const updateRemaining = () => {
+      const remaining = Math.ceil((pinLockUntil - Date.now()) / 1000)
+      if (remaining <= 0) {
+        setPinLockUntil(0)
+        setCooldownSeconds(0)
+        setFailedPinAttempts(0)
+        setAuthError('')
+        try {
+          localStorage.removeItem(PIN_LOCK_STORAGE_KEY)
+          localStorage.setItem(PIN_ATTEMPTS_STORAGE_KEY, '0')
+        } catch {}
+      } else {
+        setCooldownSeconds(remaining)
+      }
+    }
+    updateRemaining()
+    const timer = window.setInterval(updateRemaining, 500)
+    return () => window.clearInterval(timer)
+  }, [pinLockUntil])
+
   // Aggressively prevent native mobile scrolling while appointment dragging is active
   useEffect(() => {
     const container = scrollContainerRef.current
@@ -297,7 +382,13 @@ export default function AdminDashboard() {
         setBarbers(data)
         const currentBarber = data.find(b => b.user_email === session.user.email)
         setLoggedInBarber(currentBarber)
-        setSelectedBarberId(currentBarber ? currentBarber.id : data[0].id)
+        let savedBarberId: string | null = null
+        try {
+          savedBarberId = localStorage.getItem(ACTIVE_BARBER_STORAGE_KEY)
+        } catch {}
+        const validSaved = savedBarberId ? data.find(b => b.id === savedBarberId) : null
+        const initialBarberId = validSaved ? validSaved.id : (currentBarber ? currentBarber.id : data[0].id)
+        setSelectedBarberId(initialBarberId)
       }
     }
     fetchRoster()
@@ -561,11 +652,28 @@ export default function AdminDashboard() {
   }, [session, activeModule, refreshTrigger])
 
   useEffect(() => {
+    let cancelled = false
     if (showBookModal && selectedBarberId && bookService && bookDate) {
-      getAvailableSlots(selectedBarberId, bookDate, bookService.duration_minutes).then(setBookSlots)
-    } else { setBookSlots([]) }
-    // NOTE: bookTime is intentionally NOT reset here so click-to-book pre-fill survives modal open.
-  }, [showBookModal, selectedBarberId, bookService, bookDate])
+      getAvailableSlots(selectedBarberId, bookDate, bookService.duration_minutes).then((slots) => {
+        if (cancelled) return
+        setBookSlots(slots)
+        if (!isBlockoutMode) {
+          setBookTime((prev) => {
+            if (prev && slots.includes(prev)) return prev
+            if (slots.length === 0) return ''
+            if (prev) {
+              const nearest = slots.find((s) => s >= prev)
+              return nearest || slots[0]
+            }
+            return slots[0]
+          })
+        }
+      })
+    } else {
+      setBookSlots([])
+    }
+    return () => { cancelled = true }
+  }, [showBookModal, selectedBarberId, bookService, bookDate, isBlockoutMode])
 
   useEffect(() => {
     if (showManageDayModal && selectedBarberId && selectedDate) {
@@ -1425,31 +1533,224 @@ export default function AdminDashboard() {
     try { await supabase.from('services').update({ name: editForm.name, duration_minutes: parseInt(editForm.duration), price: parseFloat(editForm.price) }).eq('id', serviceId); setEditingServiceId(null); fetchMyServices() } catch (err) { console.error(err) }
   }
 
-  // --- AUTH LOGIC ---
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault(); setLoading(true); setAuthError('')
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
-    if (error) setAuthError(error.message)
-    setLoading(false)
+  // --- AUTH LOGIC (SHARED 6-DIGIT SHOP PIN + BRUTE-FORCE COOLDOWN) ---
+  const submitPin = async (pinValue: string) => {
+    if (isAuthenticating || cooldownSeconds > 0 || pinValue.length !== 6) return
+    setIsAuthenticating(true)
+    setAuthError('')
+    const { error } = await supabase.auth.signInWithPassword({
+      email: SHOP_AUTH_EMAIL,
+      password: pinValue,
+    })
+    if (error) {
+      const nextAttempts = failedPinAttempts + 1
+      setPin('')
+      if (nextAttempts >= MAX_PIN_ATTEMPTS) {
+        const lockTs = Date.now() + PIN_COOLDOWN_MS
+        setFailedPinAttempts(0)
+        setPinLockUntil(lockTs)
+        setCooldownSeconds(Math.ceil(PIN_COOLDOWN_MS / 1000))
+        setAuthError('')
+        try {
+          localStorage.setItem(PIN_ATTEMPTS_STORAGE_KEY, '0')
+          localStorage.setItem(PIN_LOCK_STORAGE_KEY, String(lockTs))
+        } catch {}
+      } else {
+        setFailedPinAttempts(nextAttempts)
+        setAuthError(`Invalid passcode. ${MAX_PIN_ATTEMPTS - nextAttempts} attempt${MAX_PIN_ATTEMPTS - nextAttempts === 1 ? '' : 's'} left before 60s lock.`)
+        try {
+          localStorage.setItem(PIN_ATTEMPTS_STORAGE_KEY, String(nextAttempts))
+        } catch {}
+      }
+    } else {
+      setFailedPinAttempts(0)
+      setPinLockUntil(0)
+      setCooldownSeconds(0)
+      setPin('')
+      setAuthError('')
+      try {
+        localStorage.removeItem(PIN_LOCK_STORAGE_KEY)
+        localStorage.setItem(PIN_ATTEMPTS_STORAGE_KEY, '0')
+      } catch {}
+    }
+    setIsAuthenticating(false)
   }
+
+  const updatePinValue = (nextValue: string) => {
+    if (isAuthenticating || cooldownSeconds > 0) return
+    const digitsOnly = nextValue.replace(/\D/g, '').slice(0, 6)
+    setPin(digitsOnly)
+    if (authError && digitsOnly.length > 0) setAuthError('')
+    if (digitsOnly.length === 6) {
+      submitPin(digitsOnly)
+    }
+  }
+
+  const handleKeypadDigit = (digit: string) => {
+    if (pin.length >= 6 || isAuthenticating || cooldownSeconds > 0) return
+    updatePinValue(pin + digit)
+  }
+
+  const handleKeypadBackspace = () => {
+    if (isAuthenticating || cooldownSeconds > 0 || pin.length === 0) return
+    setPin((prev) => prev.slice(0, -1))
+  }
+
+  const handleKeypadClear = () => {
+    if (isAuthenticating || cooldownSeconds > 0) return
+    setPin('')
+    setAuthError('')
+  }
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault()
+    await submitPin(pin)
+  }
+
   const handleLogout = async () => { await supabase.auth.signOut() }
 
   if (loading) return <div className="min-h-screen bg-[var(--color-brand-900)] flex items-center justify-center animate-pulse text-[var(--color-brand-muted)]">Checking credentials...</div>
 
-  // --- LOGIN SCREEN ---
+  // --- LOGIN SCREEN (6-DIGIT SHOP PASSCODE PIN PAD) ---
   if (!session) {
+    const isLockedOut = cooldownSeconds > 0
     return (
-      <div className="min-h-screen bg-[var(--color-brand-900)] text-[var(--color-brand-light)] font-sans flex flex-col items-center justify-center p-6">
-        <div className="w-full max-w-md bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] p-8 rounded-2xl shadow-2xl">
-          <div className="flex flex-col items-center text-center mb-8">
-            <div className="bg-[var(--color-brand-900)] p-4 rounded-full border border-[var(--color-brand-700)] mb-4"><Shield className="w-8 h-8 text-[var(--color-brand-accent)]" /></div>
-            <h1 className="text-2xl font-bold tracking-tight">Barber Login</h1>
+      <div className="min-h-screen bg-[var(--color-brand-900)] text-[var(--color-brand-light)] font-sans flex flex-col items-center justify-center p-4 sm:p-6 relative">
+        {/* Top Navigation & Theme Header */}
+        <div className="w-full max-w-sm flex items-center justify-between mb-4">
+          <Link
+            to="/"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold border border-[var(--color-brand-periwinkle)]/50 bg-[var(--color-brand-periwinkle)]/15 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            Shop Home
+          </Link>
+          <button
+            type="button"
+            onClick={toggleTheme}
+            title={isLight ? 'Switch to Dark Mode' : 'Switch to Light Mode (Matt Mode)'}
+            className="p-2 rounded-full border border-[var(--color-brand-periwinkle)]/50 bg-[var(--color-brand-periwinkle)]/15 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all cursor-pointer"
+            aria-label="Toggle Light/Dark Theme"
+          >
+            {isLight ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+          </button>
+        </div>
+
+        <div className="w-full max-w-sm card-violet-gold p-6 sm:p-8 rounded-2xl">
+          <div className="flex flex-col items-center text-center mb-6">
+            <div className="bg-[var(--color-brand-900)] p-3.5 rounded-full border border-[#D4AF37]/60 shadow-[0_0_10px_rgba(212,175,55,0.2)] mb-3">
+              <Lock className="w-7 h-7 text-[var(--color-brand-gold)]" />
+            </div>
+            <h1 className="text-2xl font-bold tracking-tight">Shop Passcode</h1>
+            <p className="text-xs text-[var(--color-brand-muted)] mt-1">
+              Enter the 6-digit LifeStyle Barber Portal PIN
+            </p>
           </div>
-          {authError && <div className="bg-red-900/20 border border-red-500/50 text-red-200 text-sm p-3 rounded-xl mb-6 text-center">{authError}</div>}
-          <form onSubmit={handleLogin} className="space-y-4">
-            <input type="email" required placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none focus:border-[var(--color-brand-accent)] text-white" />
-            <input type="password" required placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none focus:border-[var(--color-brand-accent)] text-white" />
-            <button type="submit" disabled={loading} className="w-full bg-[var(--color-brand-accent)] text-white font-bold p-3 rounded-xl mt-4 cursor-pointer hover:brightness-110 transition-all">Sign In</button>
+
+          {isLockedOut && (
+            <div className="bg-red-500/15 border border-red-500/50 text-red-500 text-xs sm:text-sm font-bold p-3 rounded-xl mb-5 text-center">
+              Too many failed attempts. Try again in {cooldownSeconds}s.
+            </div>
+          )}
+
+          {!isLockedOut && authError && (
+            <div className="bg-red-500/15 border border-red-500/50 text-red-500 text-xs sm:text-sm font-semibold p-3 rounded-xl mb-5 text-center">
+              {authError}
+            </div>
+          )}
+
+          <form onSubmit={handleLogin} className="space-y-6">
+            {/* 6 Visual PIN Boxes + Direct Keyboard / Mobile Numpad Overlay Input */}
+            <div
+              onClick={() => pinInputRef.current?.focus()}
+              className="relative flex items-center justify-center gap-2.5 sm:gap-3 cursor-text py-1"
+            >
+              <input
+                ref={pinInputRef}
+                type="password"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                autoComplete="one-time-code"
+                maxLength={6}
+                disabled={isLockedOut || isAuthenticating}
+                value={pin}
+                onChange={(e) => updatePinValue(e.target.value)}
+                aria-label="6-digit Shop Passcode"
+                className="opacity-0 absolute inset-0 w-full h-full cursor-pointer disabled:cursor-not-allowed z-10"
+              />
+              {[0, 1, 2, 3, 4, 5].map((idx) => {
+                const isFilled = idx < pin.length
+                const isNext = idx === pin.length && !isLockedOut
+                return (
+                  <div
+                    key={idx}
+                    className={`w-10 h-12 sm:w-11 sm:h-13 rounded-xl border-2 flex items-center justify-center transition-all ${
+                      isFilled
+                        ? 'border-[var(--color-brand-periwinkle)] bg-[var(--color-brand-periwinkle)]/15 shadow-sm'
+                        : isNext
+                        ? 'border-[var(--color-brand-accent)] bg-[var(--color-brand-900)]'
+                        : 'border-[var(--color-brand-700)] bg-[var(--color-brand-900)]'
+                    }`}
+                  >
+                    <div
+                      className={`w-3 h-3 rounded-full transition-all duration-150 ${
+                        isFilled
+                          ? 'bg-[var(--color-brand-periwinkle)] scale-110 shadow-[0_0_8px_var(--color-brand-periwinkle)]'
+                          : 'bg-[var(--color-brand-700)]/60 scale-75'
+                      }`}
+                    />
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* On-Screen Touch Keypad */}
+            <div className="grid grid-cols-3 gap-2.5 sm:gap-3">
+              {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((digit) => (
+                <button
+                  key={digit}
+                  type="button"
+                  disabled={isLockedOut || isAuthenticating || pin.length >= 6}
+                  onClick={() => handleKeypadDigit(digit)}
+                  className="h-14 rounded-xl bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-periwinkle)] active:bg-[var(--color-brand-periwinkle)] active:text-white text-xl font-bold text-[var(--color-brand-light)] transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none shadow-sm"
+                >
+                  {digit}
+                </button>
+              ))}
+              <button
+                type="button"
+                disabled={isLockedOut || isAuthenticating}
+                onClick={handleKeypadClear}
+                className="h-14 rounded-xl bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-periwinkle)] text-xs font-bold uppercase tracking-wider text-[var(--color-brand-muted)] hover:text-[var(--color-brand-periwinkle)] transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none"
+              >
+                Clear
+              </button>
+              <button
+                type="button"
+                disabled={isLockedOut || isAuthenticating || pin.length >= 6}
+                onClick={() => handleKeypadDigit('0')}
+                className="h-14 rounded-xl bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-periwinkle)] active:bg-[var(--color-brand-periwinkle)] active:text-white text-xl font-bold text-[var(--color-brand-light)] transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none shadow-sm"
+              >
+                0
+              </button>
+              <button
+                type="button"
+                disabled={isLockedOut || isAuthenticating || pin.length === 0}
+                onClick={handleKeypadBackspace}
+                aria-label="Backspace"
+                className="h-14 rounded-xl bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-periwinkle)] text-[var(--color-brand-muted)] hover:text-[var(--color-brand-periwinkle)] flex items-center justify-center transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none"
+              >
+                <Delete className="w-5 h-5" />
+              </button>
+            </div>
+
+            <button
+              type="submit"
+              disabled={isLockedOut || isAuthenticating || pin.length !== 6}
+              className="w-full bg-[var(--color-brand-accent)] text-white font-bold py-3 rounded-xl cursor-pointer hover:brightness-110 transition-all disabled:opacity-40 disabled:cursor-not-allowed shadow-md text-sm"
+            >
+              {isAuthenticating ? 'Unlocking Portal...' : 'Unlock Barber Portal'}
+            </button>
           </form>
         </div>
       </div>
@@ -1795,8 +2096,8 @@ export default function AdminDashboard() {
         style={{
           height: `${TOTAL_RAIL_HEIGHT}px`,
           backgroundImage: `
-            linear-gradient(to bottom, rgba(255, 255, 255, 0.12) 1px, transparent 1px),
-            linear-gradient(to bottom, rgba(255, 255, 255, 0.04) 1px, transparent 1px)
+            linear-gradient(to bottom, ${isLight ? 'rgba(23, 15, 46, 0.16)' : 'rgba(196, 181, 253, 0.16)'} 1px, transparent 1px),
+            linear-gradient(to bottom, ${isLight ? 'rgba(23, 15, 46, 0.06)' : 'rgba(196, 181, 253, 0.05)'} 1px, transparent 1px)
           `,
           backgroundSize: `100% ${PIXELS_PER_HOUR}px, 100% ${SLOT_HEIGHT}px`,
           backgroundRepeat: 'repeat-y',
@@ -1805,7 +2106,7 @@ export default function AdminDashboard() {
         {/* Off-duty overlay */}
         {isOff && (
           <div className="absolute inset-0 bg-[repeating-linear-gradient(45deg,transparent,transparent_10px,var(--color-brand-900)_10px,var(--color-brand-900)_20px)] opacity-60 z-10 pointer-events-none flex items-center justify-center">
-            <div className="bg-[var(--color-brand-900)]/90 border border-red-500/40 text-red-400 text-xs font-bold px-3 py-1.5 rounded-full shadow-lg">
+            <div className="bg-[var(--color-brand-900)]/90 border border-red-500/40 text-red-500 text-xs font-bold px-3 py-1.5 rounded-full shadow-lg">
               OFF DUTY
             </div>
           </div>
@@ -1845,7 +2146,7 @@ export default function AdminDashboard() {
               }}
             >
               {isSlotHovered && touchDraggedAppt && (
-                <div className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white pointer-events-none bg-[var(--color-brand-accent)]/30 truncate px-1">
+                <div className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-[var(--color-brand-light)] pointer-events-none bg-[var(--color-brand-accent)]/30 truncate px-1">
                   Reschedule: {formatTime(timeStr)}
                 </div>
               )}
@@ -1876,12 +2177,12 @@ export default function AdminDashboard() {
           const isThisBeingDragged = touchDraggedAppt?.id === appt.id
 
           const colorClasses = isBlockout
-            ? 'bg-zinc-800 border-zinc-600 text-zinc-300'
+            ? (isLight ? 'bg-[#C4BBE0] border-[#8273AD] text-[#170F2E] shadow-sm' : 'bg-zinc-800 border-zinc-600 text-zinc-300')
             : isBlocked
-            ? 'bg-orange-950/90 border-orange-500/80 text-orange-200'
+            ? (isLight ? 'bg-[#E5D2C4] border-[#C26A2B] text-[#431407] shadow-sm' : 'bg-orange-950/90 border-orange-500/80 text-orange-200')
             : isCompleted
-            ? 'bg-emerald-950/90 border-emerald-500/80 text-emerald-200'
-            : 'bg-[var(--color-brand-800)] border-[var(--color-brand-accent)] text-white shadow-md'
+            ? (isLight ? 'bg-[#C7DEC9] border-[#2E7D4F] text-[#052E16] shadow-sm' : 'bg-emerald-950/90 border-emerald-500/80 text-emerald-200')
+            : 'bg-[var(--color-brand-800)] border-[var(--color-brand-accent)] border-t-[#D4AF37]/70 text-[var(--color-brand-light)] shadow-md'
 
           if (isWeekView) {
             return (
@@ -1947,7 +2248,7 @@ export default function AdminDashboard() {
               {height <= 25 ? (
                 <div className="flex items-center justify-between text-xs font-bold leading-none pointer-events-none">
                   <span className="truncate flex items-center gap-1">
-                    {isBlockout ? <Ban className="w-3 h-3 flex-shrink-0 text-zinc-400" /> : isBlocked && <Lock className="w-3 h-3 flex-shrink-0 text-orange-400" />}
+                    {isBlockout ? <Ban className={`w-3 h-3 flex-shrink-0 ${isLight ? 'text-slate-600' : 'text-zinc-400'}`} /> : isBlocked && <Lock className={`w-3 h-3 flex-shrink-0 ${isLight ? 'text-orange-600' : 'text-orange-400'}`} />}
                     {isBlockout ? (appt.notes || 'Blocked Time') : isBlocked ? 'BLOCKED TIME' : appt.clients?.name || 'Walk-In'}
                   </span>
                   <span className="text-[10px] opacity-80 flex-shrink-0 ml-1">
@@ -1957,7 +2258,7 @@ export default function AdminDashboard() {
               ) : (
                 <div className="pointer-events-none flex flex-col h-full">
                   <div className={`text-xs font-bold flex items-center justify-between ${
-                    isBlockout ? 'text-zinc-400' : isBlocked ? 'text-orange-400' : isCompleted ? 'text-emerald-400' : 'text-[var(--color-brand-accent)]'
+                    isBlockout ? (isLight ? 'text-slate-600' : 'text-zinc-400') : isBlocked ? (isLight ? 'text-orange-700' : 'text-orange-400') : isCompleted ? (isLight ? 'text-emerald-700' : 'text-emerald-400') : 'text-[var(--color-brand-accent)]'
                   }`}>
                     <span className="flex items-center gap-1">
                       {isBlockout ? <Ban className="w-3 h-3 flex-shrink-0" /> : isBlocked && <Lock className="w-3 h-3 flex-shrink-0" />}
@@ -1965,7 +2266,7 @@ export default function AdminDashboard() {
                     </span>
                     {appt.notes && !isBlockout && <FileText className="w-3 h-3 flex-shrink-0 opacity-80" />}
                   </div>
-                  <div className={`text-xs truncate font-bold mt-0.5 ${isBlockout ? 'text-zinc-200' : 'text-white'}`}>
+                  <div className={`text-xs truncate font-bold mt-0.5 ${isBlockout ? (isLight ? 'text-slate-800' : 'text-zinc-200') : 'text-[var(--color-brand-light)]'}`}>
                     {isBlockout ? (appt.notes || 'Blocked Time') : isBlocked ? 'BLOCKED TIME' : appt.clients?.name || 'Walk-In'}
                   </div>
                   {height >= 55 && !isBlockout && appt.clients?.phone && appt.clients?.phone !== '0000000000' && (
@@ -2005,7 +2306,7 @@ export default function AdminDashboard() {
                     )}
                   </div>
                 </div>
-                <button onClick={() => setShowApptModal(false)} className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer"><X className="w-6 h-6" /></button>
+                <button onClick={() => setShowApptModal(false)} className="text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer"><X className="w-6 h-6" /></button>
               </div>
 
               <div className="p-6 space-y-5 overflow-y-auto flex-1">
@@ -2027,7 +2328,7 @@ export default function AdminDashboard() {
                      {selectedAppt.is_blockout ? 'Blockout Reason' : 'Appointment Booking Notes'}
                    </label>
                    {selectedAppt.notes ? (
-                     <div className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-white text-sm rounded-xl p-3">
+                     <div className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-[var(--color-brand-light)] text-sm rounded-xl p-3">
                        {selectedAppt.notes}
                      </div>
                    ) : (
@@ -2062,7 +2363,7 @@ export default function AdminDashboard() {
                        value={clientNotes}
                        onChange={(e) => setClientNotes(e.target.value)}
                        placeholder="e.g. #2 high fade, finger length on top..."
-                       className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-white rounded-xl p-3 h-28 outline-none focus:border-[var(--color-brand-accent)] resize-none text-sm"
+                       className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-[var(--color-brand-light)] rounded-xl p-3 h-28 outline-none focus:border-[var(--color-brand-accent)] resize-none text-sm"
                      />
                      <button
                        onClick={handleSaveNotes}
@@ -2116,7 +2417,7 @@ export default function AdminDashboard() {
                     setClientName('')
                     setClientPhone('')
                   }}
-                  className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer"
+                  className="text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer"
                 >
                   <X className="w-6 h-6" />
                 </button>
@@ -2130,7 +2431,7 @@ export default function AdminDashboard() {
                   className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all cursor-pointer ${
                     !isBlockoutMode
                       ? 'bg-[var(--color-brand-accent)] text-white shadow-md'
-                      : 'text-[var(--color-brand-muted)] hover:text-white'
+                      : 'text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)]'
                   }`}
                 >
                   Book Client
@@ -2146,7 +2447,7 @@ export default function AdminDashboard() {
                   className={`flex-1 py-2 text-sm font-bold rounded-lg transition-all cursor-pointer ${
                     isBlockoutMode
                       ? 'bg-zinc-700 text-white shadow-md'
-                      : 'text-[var(--color-brand-muted)] hover:text-white'
+                      : 'text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)]'
                   }`}
                 >
                   Block Time
@@ -2162,7 +2463,7 @@ export default function AdminDashboard() {
                      required
                      value={bookDate}
                      onChange={(e) => setBookDate(e.target.value)}
-                     className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none [color-scheme:dark] cursor-pointer text-white"
+                     className={`w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none ${isLight ? '[color-scheme:light]' : '[color-scheme:dark]'} cursor-pointer text-[var(--color-brand-light)]`}
                    />
                  </div>
 
@@ -2175,26 +2476,31 @@ export default function AdminDashboard() {
                          required
                          value={bookService?.id || ''}
                          onChange={(e) => setBookService(adminServices.find(s => s.id === e.target.value))}
-                         className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer text-white"
+                         className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer text-[var(--color-brand-light)]"
                        >
                          <option value="" disabled>Select service...</option>
                          {adminServices.map(s => <option key={s.id} value={s.id}>{s.name} ({s.duration_minutes}m)</option>)}
                        </select>
                      </div>
 
-                     {/* START TIME SELECT */}
+                     {/* START TIME SELECT (STRICT AVAILABLE-TIMES-ONLY) */}
                      <div>
                        <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">Start Time</label>
                        <select
                          required
-                         value={bookTime}
+                         value={bookSlots.includes(bookTime) ? bookTime : ''}
                          onChange={(e) => setBookTime(e.target.value)}
-                         className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer disabled:opacity-50 text-white"
+                         disabled={!bookService || bookSlots.length === 0}
+                         className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer disabled:opacity-50 text-[var(--color-brand-light)]"
                        >
-                         <option value="" disabled>{!bookService ? 'Select service first' : bookSlots.length === 0 ? 'No slots' : 'Select time...'}</option>
-                         {bookTime && !bookSlots.includes(bookTime) && <option value={bookTime}>{formatTime(bookTime)}</option>}
+                         <option value="" disabled>{!bookService ? 'Select service first' : bookSlots.length === 0 ? 'No open slots on this date' : 'Select available time...'}</option>
                          {bookSlots.map(time => <option key={time} value={time}>{formatTime(time)}</option>)}
                        </select>
+                       {bookService && bookSlots.length === 0 && (
+                         <p className="text-xs text-red-500 font-semibold mt-1.5">
+                           No open {bookService.duration_minutes}m slots left on {formatDisplayDate(bookDate)}.
+                         </p>
+                       )}
                      </div>
 
                      <div className="space-y-3 pt-4 border-t border-[var(--color-brand-700)]">
@@ -2206,7 +2512,7 @@ export default function AdminDashboard() {
                             placeholder="Client Name"
                             value={clientName}
                             onChange={(e) => setClientName(e.target.value)}
-                            className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-[var(--color-brand-accent)]"
+                            className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-[var(--color-brand-light)] outline-none focus:border-[var(--color-brand-accent)]"
                           />
                         </div>
                         <div className="relative">
@@ -2217,7 +2523,7 @@ export default function AdminDashboard() {
                             placeholder="Phone Number"
                             value={clientPhone}
                             onChange={(e) => setClientPhone(e.target.value)}
-                            className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-[var(--color-brand-accent)]"
+                            className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-[var(--color-brand-light)] outline-none focus:border-[var(--color-brand-accent)]"
                           />
                         </div>
                         <div className="relative">
@@ -2227,14 +2533,14 @@ export default function AdminDashboard() {
                             value={bookNotes}
                             onChange={(e) => setBookNotes(e.target.value)}
                             rows={2}
-                            className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-[var(--color-brand-accent)] resize-none"
+                            className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-[var(--color-brand-light)] outline-none focus:border-[var(--color-brand-accent)] resize-none"
                           />
                         </div>
                      </div>
 
                      <button
                        type="submit"
-                       disabled={isBooking || !bookTime || !bookService || !clientName || !clientPhone}
+                       disabled={isBooking || !bookTime || !bookSlots.includes(bookTime) || !bookService || !clientName || !clientPhone}
                        className="w-full bg-[var(--color-brand-accent)] text-white font-bold p-3 rounded-xl mt-4 cursor-pointer disabled:opacity-50 hover:not-disabled:brightness-110"
                      >
                        Confirm Appointment
@@ -2251,7 +2557,7 @@ export default function AdminDashboard() {
                            required
                            value={bookTime}
                            onChange={(e) => setBookTime(e.target.value)}
-                           className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none [color-scheme:dark] cursor-pointer text-white"
+                           className={`w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none ${isLight ? '[color-scheme:light]' : '[color-scheme:dark]'} cursor-pointer text-[var(--color-brand-light)]`}
                          />
                        </div>
                        <div>
@@ -2261,7 +2567,7 @@ export default function AdminDashboard() {
                            required
                            value={blockEndTime}
                            onChange={(e) => setBlockEndTime(e.target.value)}
-                           className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none [color-scheme:dark] cursor-pointer text-white"
+                           className={`w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none ${isLight ? '[color-scheme:light]' : '[color-scheme:dark]'} cursor-pointer text-[var(--color-brand-light)]`}
                          />
                        </div>
                      </div>
@@ -2275,7 +2581,7 @@ export default function AdminDashboard() {
                            value={bookNotes}
                            onChange={(e) => setBookNotes(e.target.value)}
                            rows={2}
-                           className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-zinc-500 resize-none"
+                           className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-[var(--color-brand-light)] outline-none focus:border-[var(--color-brand-accent)] resize-none"
                          />
                        </div>
                      </div>
@@ -2311,7 +2617,7 @@ export default function AdminDashboard() {
               </div>
               <button
                 onClick={() => setShowBarberSettingsModal(false)}
-                className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer p-1 rounded-lg"
+                className="text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer p-1 rounded-lg"
               >
                 <X className="w-6 h-6" />
               </button>
@@ -2337,12 +2643,12 @@ export default function AdminDashboard() {
                       }`}
                     >
                       <div className="flex items-center justify-between mb-2.5">
-                        <span className="font-bold text-sm sm:text-base text-white">
+                        <span className="font-bold text-sm sm:text-base text-[var(--color-brand-light)]">
                           {day.name}
                         </span>
 
                         <div className="flex items-center gap-2">
-                          <span className={`text-xs font-semibold ${isWorking ? 'text-[var(--color-brand-accent)]' : 'text-red-400'}`}>
+                          <span className={`text-xs font-semibold ${isWorking ? 'text-[var(--color-brand-accent)]' : 'text-red-500'}`}>
                             {isWorking ? 'Working' : 'Off'}
                           </span>
                           <button
@@ -2386,7 +2692,7 @@ export default function AdminDashboard() {
                                   }
                                 }))
                               }}
-                              className="w-full bg-[var(--color-brand-800)] text-white border border-[var(--color-brand-700)] rounded-lg p-2 text-xs sm:text-sm outline-none [color-scheme:dark] cursor-pointer"
+                              className={`w-full bg-[var(--color-brand-800)] text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-lg p-2 text-xs sm:text-sm outline-none ${isLight ? '[color-scheme:light]' : '[color-scheme:dark]'} cursor-pointer`}
                             />
                           </div>
                           <span className="text-[var(--color-brand-muted)] pt-5 text-xs">to</span>
@@ -2405,7 +2711,7 @@ export default function AdminDashboard() {
                                   }
                                 }))
                               }}
-                              className="w-full bg-[var(--color-brand-800)] text-white border border-[var(--color-brand-700)] rounded-lg p-2 text-xs sm:text-sm outline-none [color-scheme:dark] cursor-pointer"
+                              className={`w-full bg-[var(--color-brand-800)] text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-lg p-2 text-xs sm:text-sm outline-none ${isLight ? '[color-scheme:light]' : '[color-scheme:dark]'} cursor-pointer`}
                             />
                           </div>
                         </div>
@@ -2420,7 +2726,7 @@ export default function AdminDashboard() {
               )}
             </div>
 
-            <div className="p-5 sm:p-6 border-t border-[var(--color-brand-700)] bg-[var(--color-brand-850)] flex items-center justify-between gap-3 flex-shrink-0">
+            <div className="p-5 sm:p-6 border-t border-[var(--color-brand-700)] bg-[var(--color-brand-900)] flex items-center justify-between gap-3 flex-shrink-0">
               <button
                 type="button"
                 onClick={() => setShowManageDayModal(true)}
@@ -2460,7 +2766,7 @@ export default function AdminDashboard() {
                   <h2 className="text-xl font-bold">Manage Schedule</h2>
                   <p className="text-sm text-[var(--color-brand-accent)]">{new Date(selectedDate).toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric', timeZone: 'UTC' })}</p>
                 </div>
-                <button onClick={() => setShowManageDayModal(false)} className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer"><X className="w-6 h-6" /></button>
+                <button onClick={() => setShowManageDayModal(false)} className="text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer"><X className="w-6 h-6" /></button>
               </div>
 
               <div className="p-6 space-y-8 overflow-y-auto max-h-[80vh]">
@@ -2478,16 +2784,16 @@ export default function AdminDashboard() {
                   </div>
 
                   {isDayOff ? (
-                    <div className="bg-red-900/20 border border-red-900/50 p-4 rounded-xl text-red-400 text-sm font-semibold">
+                    <div className="bg-red-500/10 border border-red-500/40 p-4 rounded-xl text-red-500 text-sm font-semibold">
                       You are marked OFF for this entire day. Clients cannot book you.
                     </div>
                   ) : (
                     <div className="bg-[var(--color-brand-900)] p-4 rounded-xl border border-[var(--color-brand-700)] space-y-3">
                       <p className="text-xs text-[var(--color-brand-muted)] uppercase tracking-wider font-bold">Custom Working Hours</p>
                       <div className="flex items-center gap-3">
-                        <input type="time" value={overrideStart} onChange={(e) => setOverrideStart(e.target.value)} className="w-full bg-[var(--color-brand-800)] text-white border border-[var(--color-brand-700)] rounded-lg p-2 outline-none [color-scheme:dark] cursor-pointer" />
+                        <input type="time" value={overrideStart} onChange={(e) => setOverrideStart(e.target.value)} className={`w-full bg-[var(--color-brand-800)] text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-lg p-2 outline-none ${isLight ? '[color-scheme:light]' : '[color-scheme:dark]'} cursor-pointer`} />
                         <span className="text-[var(--color-brand-muted)]">to</span>
-                        <input type="time" value={overrideEnd} onChange={(e) => setOverrideEnd(e.target.value)} className="w-full bg-[var(--color-brand-800)] text-white border border-[var(--color-brand-700)] rounded-lg p-2 outline-none [color-scheme:dark] cursor-pointer" />
+                        <input type="time" value={overrideEnd} onChange={(e) => setOverrideEnd(e.target.value)} className={`w-full bg-[var(--color-brand-800)] text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-lg p-2 outline-none ${isLight ? '[color-scheme:light]' : '[color-scheme:dark]'} cursor-pointer`} />
                       </div>
                     </div>
                   )}
@@ -2504,9 +2810,9 @@ export default function AdminDashboard() {
                   <p className="text-sm text-[var(--color-brand-muted)]">Block out a chunk of the day (e.g., lunch, meetings) so online clients cannot book it.</p>
 
                   <div className="flex items-center gap-3">
-                    <input type="time" required value={blockStart} onChange={(e) => setBlockStart(e.target.value)} className="w-full bg-[var(--color-brand-900)] text-white border border-[var(--color-brand-700)] rounded-lg p-3 outline-none [color-scheme:dark] cursor-pointer" />
+                    <input type="time" required value={blockStart} onChange={(e) => setBlockStart(e.target.value)} className={`w-full bg-[var(--color-brand-900)] text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-lg p-3 outline-none ${isLight ? '[color-scheme:light]' : '[color-scheme:dark]'} cursor-pointer`} />
                     <span className="text-[var(--color-brand-muted)]">to</span>
-                    <input type="time" required value={blockEnd} onChange={(e) => setBlockEnd(e.target.value)} className="w-full bg-[var(--color-brand-900)] text-white border border-[var(--color-brand-700)] rounded-lg p-3 outline-none [color-scheme:dark] cursor-pointer" />
+                    <input type="time" required value={blockEnd} onChange={(e) => setBlockEnd(e.target.value)} className={`w-full bg-[var(--color-brand-900)] text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-lg p-3 outline-none ${isLight ? '[color-scheme:light]' : '[color-scheme:dark]'} cursor-pointer`} />
                   </div>
                   <button type="submit" disabled={isSavingOverride || !blockStart || !blockEnd} className="w-full bg-orange-600/20 text-orange-500 border border-orange-500/50 font-bold p-3 rounded-xl hover:bg-orange-600/40 transition-all cursor-pointer disabled:opacity-50">
                     Inject Block
@@ -2539,7 +2845,7 @@ export default function AdminDashboard() {
                   setNewClientPhone('')
                   setNewClientNotes('')
                 }}
-                className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer"
+                className="text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer"
               >
                 <X className="w-6 h-6" />
               </button>
@@ -2558,7 +2864,7 @@ export default function AdminDashboard() {
                     placeholder="First & Last Name"
                     value={newClientName}
                     onChange={(e) => setNewClientName(e.target.value)}
-                    className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-[var(--color-brand-accent)]"
+                    className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-[var(--color-brand-light)] outline-none focus:border-[var(--color-brand-accent)]"
                   />
                 </div>
               </div>
@@ -2575,7 +2881,7 @@ export default function AdminDashboard() {
                     placeholder="(509) 555-1234"
                     value={newClientPhone}
                     onChange={(e) => setNewClientPhone(e.target.value)}
-                    className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-[var(--color-brand-accent)]"
+                    className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-[var(--color-brand-light)] outline-none focus:border-[var(--color-brand-accent)]"
                   />
                 </div>
               </div>
@@ -2591,7 +2897,7 @@ export default function AdminDashboard() {
                     value={newClientNotes}
                     onChange={(e) => setNewClientNotes(e.target.value)}
                     rows={3}
-                    className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-white outline-none focus:border-[var(--color-brand-accent)] resize-none text-sm"
+                    className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 pl-10 text-[var(--color-brand-light)] outline-none focus:border-[var(--color-brand-accent)] resize-none text-sm"
                   />
                 </div>
               </div>
@@ -2619,7 +2925,7 @@ export default function AdminDashboard() {
                   {(selectedProfileClient.name || 'C').charAt(0).toUpperCase()}
                 </div>
                 <div className="min-w-0">
-                  <h2 className="text-xl font-bold text-white truncate">
+                  <h2 className="text-xl font-bold text-[var(--color-brand-light)] truncate">
                     {selectedProfileClient.name}
                   </h2>
                   <p className="text-xs sm:text-sm text-[var(--color-brand-accent)] font-mono">
@@ -2629,7 +2935,7 @@ export default function AdminDashboard() {
               </div>
               <button
                 onClick={() => setSelectedProfileClient(null)}
-                className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer p-1"
+                className="text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer p-1"
               >
                 <X className="w-6 h-6" />
               </button>
@@ -2674,7 +2980,7 @@ export default function AdminDashboard() {
                       required
                       value={profileName}
                       onChange={(e) => setProfileName(e.target.value)}
-                      className="w-full bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-lg p-2.5 text-sm text-white outline-none focus:border-[var(--color-brand-accent)]"
+                      className="w-full bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-lg p-2.5 text-sm text-[var(--color-brand-light)] outline-none focus:border-[var(--color-brand-accent)]"
                     />
                   </div>
                   <div>
@@ -2686,7 +2992,7 @@ export default function AdminDashboard() {
                       required
                       value={profilePhone}
                       onChange={(e) => setProfilePhone(e.target.value)}
-                      className="w-full bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-lg p-2.5 text-sm text-white font-mono outline-none focus:border-[var(--color-brand-accent)]"
+                      className="w-full bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-lg p-2.5 text-sm text-[var(--color-brand-light)] font-mono outline-none focus:border-[var(--color-brand-accent)]"
                     />
                   </div>
                 </div>
@@ -2700,7 +3006,7 @@ export default function AdminDashboard() {
                     onChange={(e) => setProfileNotes(e.target.value)}
                     placeholder="Add persistent cut notes, guard preferences, or client details..."
                     rows={3}
-                    className="w-full bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-lg p-3 text-sm text-white outline-none focus:border-[var(--color-brand-accent)] resize-none"
+                    className="w-full bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-lg p-3 text-sm text-[var(--color-brand-light)] outline-none focus:border-[var(--color-brand-accent)] resize-none"
                   />
                 </div>
 
@@ -2739,14 +3045,14 @@ export default function AdminDashboard() {
                       const barberObj = barbers.find(b => b.id === appt.barber_id)
                       const serviceObj = allShopServices.find(s => s.id === appt.service_id)
                       const statusBadge = appt.status === 'cancelled'
-                        ? 'bg-red-950/80 text-red-300 border-red-800/60'
+                        ? (isLight ? 'bg-[#E6CCD2] text-[#7F1D1D] border-[#B91C1C]/40' : 'bg-red-950/80 text-red-300 border-red-800/60')
                         : appt.status === 'no-show'
-                        ? 'bg-orange-950/80 text-orange-300 border-orange-800/60'
+                        ? (isLight ? 'bg-[#E5D2C4] text-[#7C2D12] border-[#C2410C]/40' : 'bg-orange-950/80 text-orange-300 border-orange-800/60')
                         : appt.status === 'completed'
-                        ? 'bg-emerald-950/80 text-emerald-300 border-emerald-800/60'
+                        ? (isLight ? 'bg-[#C7DEC9] text-[#14532D] border-[#15803D]/40' : 'bg-emerald-950/80 text-emerald-300 border-emerald-800/60')
                         : appt.status === 'walk-in'
-                        ? 'bg-amber-950/80 text-amber-300 border-amber-800/60'
-                        : 'bg-[var(--color-brand-accent)]/15 text-[var(--color-brand-accent)] border-[var(--color-brand-accent)]/40'
+                        ? (isLight ? 'bg-[#E8DBB8] text-[#78350F] border-[#B48A1E]/50' : 'bg-amber-950/80 text-amber-300 border-amber-800/60')
+                        : 'bg-[#D4AF37]/10 text-[var(--color-brand-gold)] border-[#D4AF37]/50'
 
                       return (
                         <div
@@ -2755,7 +3061,7 @@ export default function AdminDashboard() {
                         >
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <div className="flex items-center gap-2">
-                              <span className="font-bold text-sm text-white">
+                              <span className="font-bold text-sm text-[var(--color-brand-light)]">
                                 {formatDisplayDate(appt.appointment_date)}, {appt.appointment_date?.split('-')[0]}
                               </span>
                               <span className="text-xs font-semibold text-[var(--color-brand-accent)]">
@@ -2770,11 +3076,11 @@ export default function AdminDashboard() {
                           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--color-brand-muted)]">
                             <span className="flex items-center gap-1">
                               <Scissors className="w-3.5 h-3.5 text-[var(--color-brand-accent)]" />
-                              <strong className="text-white">{serviceObj?.name || (appt.status === 'walk-in' ? 'Walk-In Service' : 'Haircut / Service')}</strong>
+                              <strong className="text-[var(--color-brand-light)]">{serviceObj?.name || (appt.status === 'walk-in' ? 'Walk-In Service' : 'Haircut / Service')}</strong>
                             </span>
                             <span className="flex items-center gap-1">
                               <User className="w-3.5 h-3.5 text-[var(--color-brand-accent)]" />
-                              Barber: <strong className="text-white">{barberObj?.name || 'Shop Barber'}</strong>
+                              Barber: <strong className="text-[var(--color-brand-light)]">{barberObj?.name || 'Shop Barber'}</strong>
                             </span>
                           </div>
 
@@ -2817,16 +3123,16 @@ export default function AdminDashboard() {
           const isBlocked = touchDraggedAppt.status === 'blocked' || isBlockout
           const isCompleted = touchDraggedAppt.status === 'completed'
           const colorClasses = isBlockout
-            ? 'bg-zinc-800 border-zinc-600 ring-zinc-500/50 text-zinc-200'
+            ? (isLight ? 'bg-[#C4BBE0] border-[#8273AD] ring-[#8273AD]/50 text-[#170F2E]' : 'bg-zinc-800 border-zinc-600 ring-zinc-500/50 text-zinc-200')
             : isBlocked
-            ? 'bg-orange-950/95 border-orange-500 ring-orange-500/50 text-orange-200'
+            ? (isLight ? 'bg-[#E5D2C4] border-[#C26A2B] ring-[#C26A2B]/50 text-[#431407]' : 'bg-orange-950/95 border-orange-500 ring-orange-500/50 text-orange-200')
             : isCompleted
-            ? 'bg-emerald-950/95 border-emerald-500 ring-emerald-500/50 text-emerald-200'
-            : 'bg-[var(--color-brand-800)]/95 border-[var(--color-brand-accent)] ring-[var(--color-brand-accent)]/50 text-white'
+            ? (isLight ? 'bg-[#C7DEC9] border-[#2E7D4F] ring-[#2E7D4F]/50 text-[#052E16]' : 'bg-emerald-950/95 border-emerald-500 ring-emerald-500/50 text-emerald-200')
+            : 'bg-[var(--color-brand-800)]/95 border-[var(--color-brand-accent)] ring-[var(--color-brand-accent)]/50 text-[var(--color-brand-light)]'
 
           return (
             <div
-              className={`fixed z-50 pointer-events-none -translate-x-1/2 -translate-y-full mb-3 px-3.5 py-2 rounded-xl text-xs font-bold shadow-[0_20px_45px_rgba(0,0,0,0.95)] border-2 ring-2 select-none scale-105 transition-transform flex flex-col justify-between overflow-hidden min-w-[170px] max-w-[240px] ${colorClasses}`}
+              className={`fixed z-50 pointer-events-none -translate-x-1/2 -translate-y-full mb-3 px-3.5 py-2 rounded-xl text-xs font-bold shadow-[0_20px_45px_rgba(0,0,0,0.45)] border-2 ring-2 select-none scale-105 transition-transform flex flex-col justify-between overflow-hidden min-w-[170px] max-w-[240px] ${colorClasses}`}
               style={{
                 left: `${touchPos.x}px`,
                 top: `${touchPos.y - 12}px`,
@@ -2836,15 +3142,15 @@ export default function AdminDashboard() {
             >
               <div className="flex items-center gap-2.5">
                 {isBlockout ? (
-                  <Ban className="w-4 h-4 text-zinc-400 flex-shrink-0 animate-pulse" />
+                  <Ban className={`w-4 h-4 flex-shrink-0 animate-pulse ${isLight ? 'text-slate-600' : 'text-zinc-400'}`} />
                 ) : (
                   <Clock className="w-4 h-4 text-[var(--color-brand-accent)] flex-shrink-0 animate-pulse" />
                 )}
                 <div className="flex flex-col text-left min-w-0">
-                  <span className="truncate max-w-[160px] text-white font-bold">
+                  <span className="truncate max-w-[160px] text-[var(--color-brand-light)] font-bold">
                     {isBlockout ? (touchDraggedAppt.notes || 'Blocked Time') : isBlocked ? 'BLOCKED TIME' : touchDraggedAppt.clients?.name || 'Walk-In'}
                   </span>
-                  <span className={`text-[10px] font-semibold truncate ${isBlockout ? 'text-zinc-400' : 'text-[var(--color-brand-accent)]'}`}>
+                  <span className={`text-[10px] font-semibold truncate ${isBlockout ? (isLight ? 'text-slate-600' : 'text-zinc-400') : 'text-[var(--color-brand-accent)]'}`}>
                     {hoveredDropSlot ? `${formatTime(hoveredDropSlot.time)} (${hoveredDropSlot.date})` : formatTime(touchDraggedAppt.start_time)}
                   </span>
                 </div>
@@ -2855,42 +3161,58 @@ export default function AdminDashboard() {
 
         {/* COMPACT STICKY HEADER */}
         <header className="sticky top-0 z-40 bg-[var(--color-brand-900)]/95 backdrop-blur-md border-b border-[var(--color-brand-700)] select-none flex-shrink-0">
-          {/* Top Bar: Nav, Barber Selector, Quick Actions */}
-          <div className="flex items-center justify-between px-3 sm:px-4 py-2 border-b border-[var(--color-brand-700)]/50 gap-2">
-            <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+          {/* Top Bar: Back Nav, Barber Pill Switcher, Theme & Quick Actions */}
+          <div className="flex flex-wrap items-center justify-between px-3 sm:px-4 py-2 border-b border-[var(--color-brand-700)]/50 gap-2">
+            <div className="flex items-center gap-2 sm:gap-2.5 min-w-0">
               <button
                 onClick={() => setActiveModule('home')}
                 title="Back to Dashboard"
-                className="p-1.5 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-lg hover:border-[var(--color-brand-accent)] hover:text-[var(--color-brand-accent)] transition-colors cursor-pointer flex-shrink-0"
+                className="p-1.5 rounded-lg bg-[var(--color-brand-periwinkle)]/15 border border-[var(--color-brand-periwinkle)]/50 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all cursor-pointer flex-shrink-0"
               >
                 <ArrowLeft className="w-4 h-4" />
               </button>
-              <div className="relative">
-                <select
-                  value={selectedBarberId}
-                  onChange={(e) => setSelectedBarberId(e.target.value)}
-                  className="bg-[var(--color-brand-800)] text-white text-xs sm:text-sm font-bold border border-[var(--color-brand-700)] rounded-lg pl-2.5 pr-7 py-1.5 outline-none focus:border-[var(--color-brand-accent)] transition-colors cursor-pointer appearance-none truncate max-w-[150px] sm:max-w-[220px]"
-                >
-                  {barbers.map(barber => (
-                    <option key={barber.id} value={barber.id}>{barber.name}</option>
-                  ))}
-                </select>
-                <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-brand-muted)] text-[10px]">
-                  ▼
-                </div>
+
+              {/* Persistent Active Barber Pill Switcher */}
+              <div className="flex items-center gap-1 bg-[var(--color-brand-800)] p-1 rounded-full border border-[var(--color-brand-700)] overflow-x-auto max-w-[210px] sm:max-w-none">
+                {barbers.map(barber => {
+                  const isActiveBarber = barber.id === selectedBarberId
+                  return (
+                    <button
+                      key={barber.id}
+                      type="button"
+                      onClick={() => selectActiveBarber(barber.id)}
+                      className={`px-2.5 sm:px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap transition-all cursor-pointer ${
+                        isActiveBarber
+                          ? 'bg-[var(--color-brand-accent)] text-white shadow-sm'
+                          : 'text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] hover:bg-[var(--color-brand-900)]/60'
+                      }`}
+                    >
+                      {barber.name.split(' ')[0]}
+                    </button>
+                  )
+                })}
               </div>
             </div>
 
             <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
               <button
+                type="button"
+                onClick={toggleTheme}
+                title={isLight ? 'Switch to Dark Mode' : 'Switch to Light Mode (Matt Mode)'}
+                className="p-1.5 rounded-lg bg-[var(--color-brand-periwinkle)]/15 border border-[var(--color-brand-periwinkle)]/50 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all cursor-pointer"
+                aria-label="Toggle Light/Dark Theme"
+              >
+                {isLight ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+              </button>
+              <button
                 onClick={handleToday}
-                className="px-2.5 py-1.5 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                className="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-[var(--color-brand-periwinkle)]/15 border border-[var(--color-brand-periwinkle)]/50 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all cursor-pointer"
               >
                 Today
               </button>
               <button
                 onClick={() => setShowBarberSettingsModal(true)}
-                className="flex items-center gap-1 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                className="flex items-center gap-1 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-periwinkle)] px-2.5 py-1.5 rounded-lg text-xs font-bold text-[var(--color-brand-light)] transition-colors cursor-pointer"
               >
                 <SlidersHorizontal className="w-3.5 h-3.5 text-[var(--color-brand-muted)]" />
                 <span className="hidden sm:inline">Manage</span>
@@ -2910,32 +3232,32 @@ export default function AdminDashboard() {
             </div>
           </div>
 
-          {/* Sub Bar: Date Navigation & Vagaro View Mode Segmented Switcher */}
+          {/* Sub Bar: Periwinkle Date Navigation & View Mode Segmented Switcher */}
           <div className="flex items-center justify-between px-3 sm:px-4 py-2 gap-2 bg-[var(--color-brand-900)]">
             {/* Date Nav */}
-            <div className="flex items-center gap-1 sm:gap-2 min-w-0">
+            <div className="flex items-center gap-1 sm:gap-1.5 min-w-0">
               <button
                 onClick={handlePrev}
-                className="p-1 rounded-md hover:bg-[var(--color-brand-800)] text-[var(--color-brand-muted)] hover:text-white transition-colors cursor-pointer"
+                className="p-1.5 rounded-lg bg-[var(--color-brand-periwinkle)]/15 border border-[var(--color-brand-periwinkle)]/50 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all cursor-pointer"
                 title="Previous"
               >
-                <ChevronLeft className="w-4 h-4 sm:w-5 sm:h-5" />
+                <ChevronLeft className="w-4 h-4" />
               </button>
               <button
                 onClick={handleNext}
-                className="p-1 rounded-md hover:bg-[var(--color-brand-800)] text-[var(--color-brand-muted)] hover:text-white transition-colors cursor-pointer"
+                className="p-1.5 rounded-lg bg-[var(--color-brand-periwinkle)]/15 border border-[var(--color-brand-periwinkle)]/50 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all cursor-pointer"
                 title="Next"
               >
-                <ChevronRight className="w-4 h-4 sm:w-5 sm:h-5" />
+                <ChevronRight className="w-4 h-4" />
               </button>
 
-              <div className="relative flex items-center cursor-pointer group ml-1">
-                <span className="text-xs sm:text-sm font-bold text-white group-hover:text-[var(--color-brand-accent)] transition-colors truncate">
+              <div className="relative flex items-center cursor-pointer group ml-1.5">
+                <span className="text-xs sm:text-sm font-bold text-[var(--color-brand-light)] group-hover:text-[var(--color-brand-periwinkle)] transition-colors truncate">
                   {viewMode === 'month' && `${monthNames[viewMonthDate.getMonth()]} ${viewMonthDate.getFullYear()}`}
                   {viewMode === 'week' && `${monthNames[viewWeekStartDate.getMonth()].slice(0,3)} ${viewWeekStartDate.getDate()} – ${isSameMonth ? '' : monthNames[weekEndDate.getMonth()].slice(0,3) + ' '}${weekEndDate.getDate()}, ${viewWeekStartDate.getFullYear()}`}
                   {viewMode === 'day' && formatDisplayDate(selectedDate)}
                 </span>
-                <Calendar className="w-3.5 h-3.5 ml-1.5 text-[var(--color-brand-muted)] group-hover:text-[var(--color-brand-accent)] transition-colors flex-shrink-0" />
+                <Calendar className="w-3.5 h-3.5 ml-1.5 text-[var(--color-brand-periwinkle)] flex-shrink-0" />
                 <input
                   type="date"
                   value={selectedDate}
@@ -2943,19 +3265,19 @@ export default function AdminDashboard() {
                     setSelectedDate(e.target.value)
                     setBookDate(e.target.value)
                   }}
-                  className="opacity-0 absolute inset-0 w-full h-full cursor-pointer [color-scheme:dark]"
+                  className={`opacity-0 absolute inset-0 w-full h-full cursor-pointer ${isLight ? '[color-scheme:light]' : '[color-scheme:dark]'}`}
                 />
               </div>
             </div>
 
-            {/* Segmented View Mode Toggle */}
-            <div className="bg-[var(--color-brand-800)] p-0.5 rounded-lg border border-[var(--color-brand-700)] flex items-center flex-shrink-0">
+            {/* Segmented View Mode Toggle (Vivid Periwinkle) */}
+            <div className="bg-[var(--color-brand-800)] p-0.5 rounded-lg border border-[var(--color-brand-periwinkle)]/40 flex items-center flex-shrink-0 gap-0.5">
               <button
                 onClick={() => setViewMode('month')}
                 className={`px-2.5 sm:px-3 py-1 rounded-md text-xs font-bold transition-all cursor-pointer ${
                   viewMode === 'month'
-                    ? 'bg-[var(--color-brand-accent)] text-white shadow-sm'
-                    : 'text-[var(--color-brand-muted)] hover:text-white'
+                    ? 'bg-[var(--color-brand-periwinkle)] text-white shadow-sm'
+                    : 'text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)]/15'
                 }`}
               >
                 Month
@@ -2964,8 +3286,8 @@ export default function AdminDashboard() {
                 onClick={() => setViewMode('week')}
                 className={`px-2.5 sm:px-3 py-1 rounded-md text-xs font-bold transition-all cursor-pointer ${
                   viewMode === 'week'
-                    ? 'bg-[var(--color-brand-accent)] text-white shadow-sm'
-                    : 'text-[var(--color-brand-muted)] hover:text-white'
+                    ? 'bg-[var(--color-brand-periwinkle)] text-white shadow-sm'
+                    : 'text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)]/15'
                 }`}
               >
                 Week
@@ -2974,8 +3296,8 @@ export default function AdminDashboard() {
                 onClick={() => setViewMode('day')}
                 className={`px-2.5 sm:px-3 py-1 rounded-md text-xs font-bold transition-all cursor-pointer ${
                   viewMode === 'day'
-                    ? 'bg-[var(--color-brand-accent)] text-white shadow-sm'
-                    : 'text-[var(--color-brand-muted)] hover:text-white'
+                    ? 'bg-[var(--color-brand-periwinkle)] text-white shadow-sm'
+                    : 'text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)]/15'
                 }`}
               >
                 Day
@@ -2990,7 +3312,9 @@ export default function AdminDashboard() {
           {viewMode === 'day' && (
             <div ref={scrollContainerRef} className="flex-1 w-full overflow-y-auto overflow-x-hidden relative flex flex-col">
               {isDayOff && (
-                <div className="bg-red-950/80 border-b border-red-800 text-red-200 px-4 py-1.5 text-xs font-semibold flex items-center justify-between z-30 flex-shrink-0">
+                <div className={`border-b px-4 py-1.5 text-xs font-semibold flex items-center justify-between z-30 flex-shrink-0 ${
+                  isLight ? 'bg-[#E6CCD2] border-[#B91C1C]/40 text-[#7F1D1D]' : 'bg-red-950/80 border-red-800 text-red-200'
+                }`}>
                   <span>Barber is marked OFF for this day. Tap Manage to adjust schedule.</span>
                   <button onClick={() => setShowManageDayModal(true)} className="underline cursor-pointer font-bold ml-2">Edit</button>
                 </div>
@@ -3012,7 +3336,7 @@ export default function AdminDashboard() {
           {viewMode === 'week' && (
             <div className="flex-1 w-full flex flex-col overflow-hidden">
               {/* Sticky Day Column Headers */}
-              <div className="flex bg-[var(--color-brand-850)] border-b border-[var(--color-brand-700)] select-none flex-shrink-0 w-full">
+              <div className="flex bg-[var(--color-brand-800)] border-b border-[var(--color-brand-700)] select-none flex-shrink-0 w-full">
                 <div className="w-12 sm:w-14 flex-shrink-0 border-r border-[var(--color-brand-700)] bg-[var(--color-brand-900)]" />
                 <div className="flex-1 grid grid-cols-7 w-full min-w-0">
                   {Array.from({ length: 7 }).map((_, i) => {
@@ -3031,12 +3355,12 @@ export default function AdminDashboard() {
                         }`}
                       >
                         <div className={`text-[9px] sm:text-[10px] uppercase font-bold tracking-tight truncate ${
-                          isToday ? 'text-[var(--color-brand-accent)]' : 'text-[var(--color-brand-muted)] group-hover:text-white'
+                          isToday ? 'text-[var(--color-brand-accent)]' : 'text-[var(--color-brand-muted)] group-hover:text-[var(--color-brand-light)]'
                         }`}>
                           {dayNamesShort[d.getDay()]}
                         </div>
                         <div className={`text-xs sm:text-base font-bold truncate ${
-                          isToday ? 'text-[var(--color-brand-accent)]' : isSelected ? 'text-white underline' : 'text-white'
+                          isToday ? 'text-[var(--color-brand-accent)]' : isSelected ? 'text-[var(--color-brand-light)] underline' : 'text-[var(--color-brand-light)]'
                         }`}>
                           {d.getDate()}
                         </div>
@@ -3073,7 +3397,7 @@ export default function AdminDashboard() {
           {viewMode === 'month' && (
             <div className="flex-1 w-full flex flex-col overflow-hidden">
               {/* Day of Week Headers */}
-              <div className="grid grid-cols-7 border-b border-[var(--color-brand-700)] bg-[var(--color-brand-850)] py-2 select-none flex-shrink-0">
+              <div className="grid grid-cols-7 border-b border-[var(--color-brand-700)] bg-[var(--color-brand-800)] py-2 select-none flex-shrink-0">
                 {dayNamesShort.map(day => (
                   <div key={day} className="text-center text-[10px] sm:text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider">
                     {day}
@@ -3112,7 +3436,9 @@ export default function AdminDashboard() {
                           {date.getDate()}
                         </span>
                         {isOff && (
-                          <span className="text-[9px] font-bold text-red-400 bg-red-950/60 border border-red-800/60 px-1 rounded">
+                          <span className={`text-[9px] font-bold px-1 rounded border ${
+                            isLight ? 'text-[#991B1B] bg-[#E6CCD2] border-[#B91C1C]/40' : 'text-red-400 bg-red-950/60 border-red-800/60'
+                          }`}>
                             OFF
                           </span>
                         )}
@@ -3131,19 +3457,19 @@ export default function AdminDashboard() {
                             const isBlocked = appt.status === 'blocked' || isBlockout
                             const isCompleted = appt.status === 'completed'
                             const chipBg = isBlockout
-                              ? 'bg-zinc-800 border-zinc-600 text-zinc-300'
+                              ? (isLight ? 'bg-[#C4BBE0] border-[#8273AD] text-[#170F2E]' : 'bg-zinc-800 border-zinc-600 text-zinc-300')
                               : isBlocked
-                              ? 'bg-orange-950/80 border-orange-700/60 text-orange-200'
+                              ? (isLight ? 'bg-[#E5D2C4] border-[#C26A2B] text-[#431407]' : 'bg-orange-950/80 border-orange-700/60 text-orange-200')
                               : isCompleted
-                              ? 'bg-emerald-950/80 border-emerald-700/60 text-emerald-200'
-                              : 'bg-[var(--color-brand-800)] border-[var(--color-brand-700)] text-white group-hover:border-[var(--color-brand-accent)]/50'
+                              ? (isLight ? 'bg-[#C7DEC9] border-[#2E7D4F] text-[#052E16]' : 'bg-emerald-950/80 border-emerald-700/60 text-emerald-200')
+                              : 'bg-[var(--color-brand-800)] border-[var(--color-brand-700)] text-[var(--color-brand-light)] group-hover:border-[var(--color-brand-accent)]/50'
 
                             return (
                               <div
                                 key={appt.id}
                                 className={`text-[10px] truncate px-1.5 py-0.5 rounded border font-medium flex items-center gap-1 ${chipBg}`}
                               >
-                                <span className={`${isBlockout ? 'text-zinc-400' : 'text-[var(--color-brand-accent)]'} font-bold text-[9px] flex-shrink-0`}>
+                                <span className={`${isBlockout ? (isLight ? 'text-slate-600' : 'text-zinc-400') : 'text-[var(--color-brand-accent)]'} font-bold text-[9px] flex-shrink-0`}>
                                   {formatTime(appt.start_time).replace(':00', '')}
                                 </span>
                                 <span className="truncate">
@@ -3177,39 +3503,109 @@ export default function AdminDashboard() {
   return (
     <div className="min-h-screen bg-[var(--color-brand-900)] text-[var(--color-brand-light)] p-4 md:p-8 font-sans relative">
       <div className="max-w-4xl mx-auto">
-        <header className="flex items-center justify-between mb-8 border-b border-[var(--color-brand-700)] pb-6">
-          <div className="flex items-center gap-3">
-            <Shield className="text-[var(--color-brand-accent)] w-8 h-8" />
-            <div>
-              <h1 className="text-2xl font-bold">Barber Portal</h1>
-              <p className="text-sm text-[var(--color-brand-muted)]">{session.user.email}</p>
+        <header className="flex flex-col gap-4 mb-8 border-b border-[var(--color-brand-700)] pb-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-full bg-[var(--color-brand-800)] border border-[#D4AF37]/60 shadow-[0_0_10px_rgba(212,175,55,0.2)] flex-shrink-0">
+                <Shield className="text-[var(--color-brand-gold)] w-6 h-6" />
+              </div>
+              <div>
+                <h1 className="text-2xl font-bold">Barber Portal</h1>
+                <p className="text-xs sm:text-sm text-[var(--color-brand-muted)] flex items-center gap-1.5 mt-0.5">
+                  <span>Active Chair:</span>
+                  <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold border border-[#D4AF37]/60 bg-[#D4AF37]/10 text-[var(--color-brand-gold)]">
+                    {barbers.find(b => b.id === selectedBarberId)?.name || 'Shop Staff'}
+                  </span>
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={toggleTheme}
+                title={isLight ? 'Switch to Dark Mode' : 'Switch to Light Mode (Matt Mode)'}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs sm:text-sm font-bold border border-[var(--color-brand-periwinkle)]/60 bg-[var(--color-brand-periwinkle)]/15 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all cursor-pointer"
+                aria-label="Toggle Light/Dark Theme"
+              >
+                {isLight ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+                <span className="hidden sm:inline">{isLight ? 'Dark' : 'Light'}</span>
+              </button>
+
+              <Link
+                to="/"
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs sm:text-sm font-bold border border-[var(--color-brand-periwinkle)]/60 bg-[var(--color-brand-periwinkle)]/15 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all"
+              >
+                <ExternalLink className="w-4 h-4" />
+                <span>View Live Shop</span>
+              </Link>
+
+              <button
+                onClick={handleLogout}
+                className="flex items-center gap-2 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-periwinkle)] px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors cursor-pointer"
+              >
+                <LogOut className="w-4 h-4" /> Sign Out
+              </button>
             </div>
           </div>
-          <button onClick={handleLogout} className="flex items-center gap-2 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] px-4 py-2 rounded-lg text-sm font-medium transition-colors cursor-pointer">
-            <LogOut className="w-4 h-4" /> Sign Out
-          </button>
+
+          {/* Persistent Active Barber Pill Switcher (Michael • Matt • Flor) */}
+          {barbers.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-[var(--color-brand-muted)] mr-1">
+                Active Barber:
+              </span>
+              <div className="inline-flex flex-wrap items-center gap-1.5 bg-[var(--color-brand-800)] p-1 rounded-full border border-[#D4AF37]/40">
+                {barbers.map(barber => {
+                  const isActiveBarber = barber.id === selectedBarberId
+                  return (
+                    <button
+                      key={barber.id}
+                      type="button"
+                      onClick={() => selectActiveBarber(barber.id)}
+                      className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
+                        isActiveBarber
+                          ? 'bg-[var(--color-brand-accent)] text-white shadow-sm ring-1 ring-[#D4AF37]/70'
+                          : 'text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] hover:bg-[var(--color-brand-900)]/60'
+                      }`}
+                    >
+                      {barber.name}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
         </header>
 
         {/* --- MAIN MODULE NAVIGATION --- */}
         {activeModule === 'home' && (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-            <button onClick={() => setActiveModule('calendar')} className="bg-[var(--color-brand-800)] p-6 rounded-xl border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] transition-colors text-left group cursor-pointer">
-              <Calendar className="w-6 h-6 text-[var(--color-brand-accent)] mb-3" />
+            <button onClick={() => setActiveModule('calendar')} className="card-violet-gold p-6 rounded-xl transition-all text-left group cursor-pointer">
+              <div className="w-10 h-10 rounded-full bg-[var(--color-brand-900)] border border-[#D4AF37]/60 shadow-[0_0_10px_rgba(212,175,55,0.2)] flex items-center justify-center mb-3">
+                <Calendar className="w-5 h-5 text-[var(--color-brand-gold)]" />
+              </div>
               <h3 className="text-lg font-bold mb-1 group-hover:text-[var(--color-brand-accent)]">Live Calendar</h3>
               <p className="text-xs text-[var(--color-brand-muted)]">Manage daily lineup</p>
             </button>
-            <button onClick={() => setActiveModule('walkin')} className="bg-[var(--color-brand-800)] p-6 rounded-xl border border-[var(--color-brand-700)] hover:border-orange-500 transition-colors text-left group cursor-pointer">
-              <Zap className="w-6 h-6 text-orange-500 mb-3" />
+            <button onClick={() => setActiveModule('walkin')} className="card-violet-gold p-6 rounded-xl transition-all text-left group cursor-pointer">
+              <div className="w-10 h-10 rounded-full bg-[var(--color-brand-900)] border border-[#D4AF37]/60 shadow-[0_0_10px_rgba(212,175,55,0.2)] flex items-center justify-center mb-3">
+                <Zap className="w-5 h-5 text-orange-500" />
+              </div>
               <h3 className="text-lg font-bold mb-1 group-hover:text-orange-500">Express Walk-In</h3>
               <p className="text-xs text-[var(--color-brand-muted)]">1-Tap shop lockdown</p>
             </button>
-            <button onClick={() => setActiveModule('clients')} className="bg-[var(--color-brand-800)] p-6 rounded-xl border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] transition-colors text-left group cursor-pointer">
-              <Users className="w-6 h-6 text-[var(--color-brand-accent)] mb-3" />
+            <button onClick={() => setActiveModule('clients')} className="card-violet-gold p-6 rounded-xl transition-all text-left group cursor-pointer">
+              <div className="w-10 h-10 rounded-full bg-[var(--color-brand-900)] border border-[#D4AF37]/60 shadow-[0_0_10px_rgba(212,175,55,0.2)] flex items-center justify-center mb-3">
+                <Users className="w-5 h-5 text-[var(--color-brand-gold)]" />
+              </div>
               <h3 className="text-lg font-bold mb-1 group-hover:text-[var(--color-brand-accent)]">Clients</h3>
               <p className="text-xs text-[var(--color-brand-muted)]">Cut notes & history</p>
             </button>
-            <button onClick={() => setActiveModule('services')} className="bg-[var(--color-brand-800)] p-6 rounded-xl border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] transition-colors text-left group cursor-pointer">
-              <Settings className="w-6 h-6 text-[var(--color-brand-accent)] mb-3" />
+            <button onClick={() => setActiveModule('services')} className="card-violet-gold p-6 rounded-xl transition-all text-left group cursor-pointer">
+              <div className="w-10 h-10 rounded-full bg-[var(--color-brand-900)] border border-[#D4AF37]/60 shadow-[0_0_10px_rgba(212,175,55,0.2)] flex items-center justify-center mb-3">
+                <Settings className="w-5 h-5 text-[var(--color-brand-gold)]" />
+              </div>
               <h3 className="text-lg font-bold mb-1 group-hover:text-[var(--color-brand-accent)]">My Services</h3>
               <p className="text-xs text-[var(--color-brand-muted)]">Prices & durations</p>
             </button>
@@ -3220,7 +3616,7 @@ export default function AdminDashboard() {
         {activeModule === 'walkin' && (
           <div className="bg-[var(--color-brand-800)] border border-orange-500/30 rounded-2xl p-6 shadow-[0_0_40px_rgba(249,115,22,0.1)] animate-in fade-in max-w-2xl mx-auto">
             <div className="flex items-center gap-3 mb-8">
-              <button onClick={() => setActiveModule('home')} className="p-2 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-full hover:border-orange-500 cursor-pointer">
+              <button onClick={() => setActiveModule('home')} className="p-2 rounded-full bg-[var(--color-brand-periwinkle)]/15 border border-[var(--color-brand-periwinkle)]/50 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all cursor-pointer">
                 <ArrowLeft className="w-5 h-5" />
               </button>
               <div>
@@ -3230,14 +3626,14 @@ export default function AdminDashboard() {
             </div>
 
             <div className="flex flex-col sm:flex-row gap-4 mb-8">
-              <select value={walkInBarberId} onChange={(e) => setWalkInBarberId(e.target.value)} className="w-full sm:w-1/3 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-4 outline-none appearance-none cursor-pointer font-bold">
+              <select value={walkInBarberId} onChange={(e) => setWalkInBarberId(e.target.value)} className="w-full sm:w-1/3 bg-[var(--color-brand-900)] text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-xl p-4 outline-none appearance-none cursor-pointer font-bold">
                 <option value="any">All Available Barbers</option>
                 {barbers.map(barber => <option key={barber.id} value={barber.id}>{barber.name}</option>)}
               </select>
 
-              <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} className="w-full sm:w-1/3 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-4 outline-none [color-scheme:dark] cursor-pointer font-bold" />
+              <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} className={`w-full sm:w-1/3 bg-[var(--color-brand-900)] text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-xl p-4 outline-none ${isLight ? '[color-scheme:light]' : '[color-scheme:dark]'} cursor-pointer font-bold`} />
 
-              <select value={walkInService?.id || ''} onChange={(e) => setWalkInService(adminServices.find(s => s.id === e.target.value))} className="w-full sm:w-1/3 bg-[var(--color-brand-900)] border border-orange-500/50 rounded-xl p-4 outline-none appearance-none cursor-pointer font-bold text-orange-400">
+              <select value={walkInService?.id || ''} onChange={(e) => setWalkInService(adminServices.find(s => s.id === e.target.value))} className="w-full sm:w-1/3 bg-[var(--color-brand-900)] border border-orange-500/50 rounded-xl p-4 outline-none appearance-none cursor-pointer font-bold text-orange-500">
                 <option value="" disabled>Select Service...</option>
                 {adminServices.map(s => <option key={s.id} value={s.id}>{s.name} ({s.duration_minutes}m)</option>)}
               </select>
@@ -3275,7 +3671,7 @@ export default function AdminDashboard() {
           <div className="bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-2xl p-4 md:p-6 shadow-xl animate-in fade-in">
             <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 mb-6">
               <div className="flex items-center gap-3">
-                <button onClick={() => setActiveModule('home')} className="p-2 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-full hover:border-[var(--color-brand-accent)] cursor-pointer">
+                <button onClick={() => setActiveModule('home')} className="p-2 rounded-full bg-[var(--color-brand-periwinkle)]/15 border border-[var(--color-brand-periwinkle)]/50 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all cursor-pointer">
                   <ArrowLeft className="w-5 h-5" />
                 </button>
                 <div>
@@ -3283,7 +3679,7 @@ export default function AdminDashboard() {
                   <p className="text-sm text-[var(--color-brand-muted)]">Manage your personal service menu.</p>
                 </div>
               </div>
-              <select value={selectedBarberId} onChange={(e) => setSelectedBarberId(e.target.value)} className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-lg p-3 outline-none cursor-pointer font-semibold appearance-none">
+              <select value={selectedBarberId} onChange={(e) => selectActiveBarber(e.target.value)} className="bg-[var(--color-brand-900)] text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-lg p-3 outline-none cursor-pointer font-semibold appearance-none">
                 {barbers.map(barber => <option key={barber.id} value={barber.id}>{barber.name}'s Menu</option>)}
               </select>
             </div>
@@ -3292,7 +3688,7 @@ export default function AdminDashboard() {
               <div className="mb-8 p-4 border border-[var(--color-brand-accent)] bg-[var(--color-brand-accent)]/10 rounded-xl">
                 <h3 className="text-sm font-bold text-[var(--color-brand-accent)] mb-3">Shop Owner Controls: Master Menu</h3>
                 <form onSubmit={handleAddMasterService} className="flex flex-col sm:flex-row gap-3">
-                  <input type="text" required placeholder="Inject a new global service (e.g. Mullet Fade)..." value={newMasterName} onChange={(e) => setNewMasterName(e.target.value)} className="flex-grow bg-[var(--color-brand-900)] text-white border border-[var(--color-brand-700)] rounded-lg p-3 outline-none focus:border-[var(--color-brand-accent)]" />
+                  <input type="text" required placeholder="Inject a new global service (e.g. Mullet Fade)..." value={newMasterName} onChange={(e) => setNewMasterName(e.target.value)} className="flex-grow bg-[var(--color-brand-900)] text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-lg p-3 outline-none focus:border-[var(--color-brand-accent)]" />
                   <button type="submit" className="bg-[var(--color-brand-accent)] text-white font-bold p-3 rounded-lg hover:brightness-110 transition-all cursor-pointer whitespace-nowrap">Add to Global List</button>
                 </form>
               </div>
@@ -3301,20 +3697,20 @@ export default function AdminDashboard() {
             <form onSubmit={handleAddService} className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] p-4 rounded-xl mb-8 flex flex-col md:flex-row gap-4 items-end">
               <div className="w-full md:w-2/5">
                 <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-2">Select Official Service</label>
-                <select required value={newServiceName} onChange={(e) => setNewServiceName(e.target.value)} className="w-full bg-[var(--color-brand-800)] text-white border border-[var(--color-brand-700)] rounded-lg p-3 outline-none focus:border-[var(--color-brand-accent)] appearance-none cursor-pointer">
+                <select required value={newServiceName} onChange={(e) => setNewServiceName(e.target.value)} className="w-full bg-[var(--color-brand-800)] text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-lg p-3 outline-none focus:border-[var(--color-brand-accent)] appearance-none cursor-pointer">
                   <option value="" disabled>Select Service...</option>
                   {masterServices.map(name => <option key={name} value={name}>{name}</option>)}
                 </select>
               </div>
               <div className="w-full md:w-1/5">
                 <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-2">Mins</label>
-                <select value={newServiceDuration} onChange={(e) => setNewServiceDuration(e.target.value)} className="w-full bg-[var(--color-brand-800)] text-white border border-[var(--color-brand-700)] rounded-lg p-3 outline-none focus:border-[var(--color-brand-accent)] appearance-none cursor-pointer">
+                <select value={newServiceDuration} onChange={(e) => setNewServiceDuration(e.target.value)} className="w-full bg-[var(--color-brand-800)] text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-lg p-3 outline-none focus:border-[var(--color-brand-accent)] appearance-none cursor-pointer">
                   {[15, 30, 45, 60, 75, 90, 105, 120].map(mins => <option key={mins} value={mins}>{mins}</option>)}
                 </select>
               </div>
               <div className="w-full md:w-1/5">
                 <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-2">Price ($)</label>
-                <input type="number" required placeholder="40" value={newServicePrice} onChange={(e) => setNewServicePrice(e.target.value)} className="w-full bg-[var(--color-brand-800)] text-white border border-[var(--color-brand-700)] rounded-lg p-3 outline-none focus:border-[var(--color-brand-accent)]" />
+                <input type="number" required placeholder="40" value={newServicePrice} onChange={(e) => setNewServicePrice(e.target.value)} className="w-full bg-[var(--color-brand-800)] text-[var(--color-brand-light)] border border-[var(--color-brand-700)] rounded-lg p-3 outline-none focus:border-[var(--color-brand-accent)]" />
               </div>
               <div className="w-full md:w-1/5">
                 <button type="submit" disabled={isSubmittingService || !newServiceName} className="w-full bg-[var(--color-brand-accent)] text-white font-bold p-3 rounded-lg hover:brightness-110 transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50">
@@ -3328,7 +3724,7 @@ export default function AdminDashboard() {
                  <div className="text-center py-8 text-[var(--color-brand-muted)] border border-dashed border-[var(--color-brand-700)] rounded-xl">No services found. Add your first service above.</div>
               ) : (
                 myServices.map(service => (
-                  <div key={service.id} className={`bg-[var(--color-brand-900)] border p-4 rounded-xl transition-colors ${service.is_active ? 'border-[var(--color-brand-700)]' : 'border-red-900/50 opacity-50'}`}>
+                  <div key={service.id} className={`card-violet-gold p-4 rounded-xl transition-all ${service.is_active ? '' : 'opacity-50'}`}>
 
                     {editingServiceId === service.id ? (
                       <div className="flex flex-col sm:flex-row items-center gap-3">
@@ -3347,7 +3743,7 @@ export default function AdminDashboard() {
                     ) : (
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-4">
-                          <div className={`p-3 rounded-full ${service.is_active ? 'bg-[var(--color-brand-800)] text-[var(--color-brand-accent)]' : 'bg-red-900/20 text-red-500'}`}>
+                          <div className={`p-3 rounded-full border ${service.is_active ? 'bg-[var(--color-brand-900)] border-[#D4AF37]/60 text-[var(--color-brand-gold)]' : 'bg-red-900/20 border-red-500/40 text-red-500'}`}>
                             <Scissors className="w-5 h-5" />
                           </div>
                           <div>
@@ -3414,14 +3810,14 @@ export default function AdminDashboard() {
                 <div className="flex items-center gap-3">
                   <button
                     onClick={() => setActiveModule('home')}
-                    className="p-2 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-full hover:border-[var(--color-brand-accent)] transition-colors cursor-pointer"
+                    className="p-2 rounded-full bg-[var(--color-brand-periwinkle)]/15 border border-[var(--color-brand-periwinkle)]/50 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all cursor-pointer"
                   >
                     <ArrowLeft className="w-5 h-5" />
                   </button>
                   <div>
                     <div className="flex items-center gap-2.5">
                       <h2 className="text-xl font-bold">Client Directory</h2>
-                      <span className="text-xs font-bold bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] text-[var(--color-brand-accent)] px-2.5 py-0.5 rounded-full">
+                      <span className="text-xs font-bold bg-[var(--color-brand-900)] border border-[#D4AF37]/60 text-[var(--color-brand-gold)] px-2.5 py-0.5 rounded-full">
                         {clientsList.length}
                       </span>
                     </div>
@@ -3456,14 +3852,14 @@ export default function AdminDashboard() {
               {/* CSV Import Status Banner */}
               {csvImportResult && (
                 <div className="bg-[var(--color-brand-900)] border border-[var(--color-brand-accent)]/60 rounded-xl p-3.5 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5 text-xs sm:text-sm text-white font-semibold">
+                  <div className="flex items-center gap-2.5 text-xs sm:text-sm text-[var(--color-brand-light)] font-semibold">
                     <CheckCircle2 className="w-4 h-4 text-[var(--color-brand-accent)] flex-shrink-0" />
                     <span>{csvImportResult}</span>
                   </div>
                   <button
                     type="button"
                     onClick={() => setCsvImportResult(null)}
-                    className="text-[var(--color-brand-muted)] hover:text-white cursor-pointer"
+                    className="text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer"
                   >
                     <X className="w-4 h-4" />
                   </button>
@@ -3481,13 +3877,13 @@ export default function AdminDashboard() {
                     setClientSearch(e.target.value)
                     setVisibleClientCount(100)
                   }}
-                  className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] focus:border-[var(--color-brand-accent)] rounded-xl py-3 pl-10 pr-10 text-sm text-white outline-none transition-colors"
+                  className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] focus:border-[var(--color-brand-accent)] rounded-xl py-3 pl-10 pr-10 text-sm text-[var(--color-brand-light)] outline-none transition-colors"
                 />
                 {clientSearch && (
                   <button
                     type="button"
                     onClick={() => setClientSearch('')}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--color-brand-muted)] hover:text-white cursor-pointer"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer"
                   >
                     <X className="w-4 h-4" />
                   </button>
@@ -3502,7 +3898,7 @@ export default function AdminDashboard() {
               ) : filteredClients.length === 0 ? (
                 <div className="text-center py-12 text-[var(--color-brand-muted)] bg-[var(--color-brand-900)] rounded-xl border border-dashed border-[var(--color-brand-700)] p-6">
                   <Users className="w-8 h-8 text-[var(--color-brand-muted)] mx-auto mb-2 opacity-60" />
-                  <p className="font-bold text-white text-sm">
+                  <p className="font-bold text-[var(--color-brand-light)] text-sm">
                     {clientSearch ? 'No matching clients found' : 'No clients in directory yet'}
                   </p>
                   <p className="text-xs mt-1">
@@ -3522,30 +3918,30 @@ export default function AdminDashboard() {
                         key={client.id}
                         type="button"
                         onClick={() => handleOpenClientProfile(client)}
-                        className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] rounded-xl p-4 text-left transition-all cursor-pointer group flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-sm"
+                        className="w-full card-violet-gold rounded-xl p-4 text-left transition-all cursor-pointer group flex flex-col sm:flex-row sm:items-center justify-between gap-3"
                       >
                         <div className="flex items-start gap-3.5 min-w-0 flex-1">
-                          <div className="w-10 h-10 rounded-full bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] group-hover:border-[var(--color-brand-accent)] flex items-center justify-center text-[var(--color-brand-accent)] font-bold text-sm flex-shrink-0 mt-0.5 transition-colors">
+                          <div className="w-10 h-10 rounded-full bg-[var(--color-brand-900)] border border-[#D4AF37]/60 shadow-[0_0_8px_rgba(212,175,55,0.2)] flex items-center justify-center text-[var(--color-brand-gold)] font-bold text-sm flex-shrink-0 mt-0.5 transition-colors">
                             {(client.name || 'C').charAt(0).toUpperCase()}
                           </div>
 
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                              <h3 className="font-bold text-base text-white group-hover:text-[var(--color-brand-accent)] transition-colors truncate">
+                              <h3 className="font-bold text-base text-[var(--color-brand-light)] group-hover:text-[var(--color-brand-accent)] transition-colors truncate">
                                 {client.name}
                               </h3>
-                              <span className="text-xs font-mono text-[var(--color-brand-muted)] bg-[var(--color-brand-800)] px-2 py-0.5 rounded border border-[var(--color-brand-700)]">
+                              <span className="text-xs font-mono text-[var(--color-brand-muted)] bg-[var(--color-brand-900)]/60 px-2 py-0.5 rounded border border-[var(--color-brand-700)]">
                                 {formatPhoneNumber(client.phone)}
                               </span>
                             </div>
 
                             {client.notes ? (
                               <p className="text-xs text-[var(--color-brand-muted)] mt-1.5 line-clamp-2 flex items-start gap-1.5">
-                                <FileText className="w-3.5 h-3.5 text-[var(--color-brand-accent)] flex-shrink-0 mt-0.5" />
+                                <FileText className="w-3.5 h-3.5 text-[var(--color-brand-gold)] flex-shrink-0 mt-0.5" />
                                 <span className="truncate">{client.notes}</span>
                               </p>
                             ) : (
-                              <p className="text-xs text-[var(--color-brand-muted)]/50 italic mt-1">
+                              <p className="text-xs text-[var(--color-brand-muted)]/60 italic mt-1">
                                 No persistent cut notes yet — tap to add notes
                               </p>
                             )}
@@ -3553,10 +3949,10 @@ export default function AdminDashboard() {
                         </div>
 
                         <div className="flex items-center justify-between sm:justify-end gap-3 border-t sm:border-t-0 border-[var(--color-brand-700)]/60 pt-2.5 sm:pt-0 flex-shrink-0">
-                          <span className="text-xs font-bold px-2.5 py-1 rounded-lg bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] text-[var(--color-brand-accent)]">
+                          <span className="text-xs font-bold px-2.5 py-1 rounded-lg bg-[var(--color-brand-900)]/70 border border-[#D4AF37]/50 text-[var(--color-brand-gold)]">
                             {apptCount} {apptCount === 1 ? 'Appt' : 'Appts'}
                           </span>
-                          <span className="text-xs font-bold text-[var(--color-brand-muted)] group-hover:text-white transition-colors">
+                          <span className="text-xs font-bold text-[var(--color-brand-periwinkle)] group-hover:underline transition-colors">
                             Profile →
                           </span>
                         </div>

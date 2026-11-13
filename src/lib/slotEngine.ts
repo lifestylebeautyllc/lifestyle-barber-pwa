@@ -120,27 +120,37 @@ export async function getAvailableSlots(
 
   if (!isWorking || end <= start) return []
 
-  // 3. Fetch active appointments for collision prevention
+  // 3. Fetch active appointments for collision prevention (including booked, walk-in, blocked, is_blockout)
   const { data: appointments } = await supabase
     .from('appointments')
-    .select('start_time, end_time')
+    .select('start_time, end_time, status, is_blockout')
     .eq('barber_id', barberId)
     .eq('appointment_date', dateStr)
-    .neq('status', 'cancelled')
 
-  const blockedIntervals = (appointments || []).map(app => ({
-    start: timeToMinutes(app.start_time),
-    end: timeToMinutes(app.end_time)
-  }))
+  const blockedIntervals = (appointments || [])
+    .filter(app => app.status !== 'cancelled')
+    .map(app => ({
+      start: timeToMinutes(app.start_time),
+      end: timeToMinutes(app.end_time)
+    }))
 
   if (breakStart !== null && breakEnd !== null) {
     blockedIntervals.push({ start: breakStart, end: breakEnd })
   }
 
+  // 4. Real-Time Past-Slot Filter for today's local date
+  const now = new Date()
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  const isToday = dateStr === todayStr
+  const nowMinutes = now.getHours() * 60 + now.getMinutes() + 5
+
   const availableSlots: string[] = []
   const increment = 15
 
+  if (serviceDurationMinutes <= 0) return []
+
   for (let current = start; current + serviceDurationMinutes <= end; current += increment) {
+    if (isToday && current < nowMinutes) continue
     const slotEnd = current + serviceDurationMinutes
     const hasConflict = blockedIntervals.some(block => current < block.end && slotEnd > block.start)
     if (!hasConflict) availableSlots.push(minutesToTime(current))

@@ -1,24 +1,87 @@
 @import "tailwindcss";
 
 @theme {
-  /* Pitch black background */
-  --color-brand-900: #000000;
-  /* Sleek, dark gray for the Barber cards */
-  --color-brand-800: #121212;
+  /* Deepest obsidian-violet night canvas */
+  --color-brand-900: #040208;
+  /* Rich royal violet for cards and panels */
+  --color-brand-800: #231242;
 
-  /* Visible borders - much lighter than before */
-  --color-brand-700: #4B5563;
-  /* Highly readable gray for subtext */
-  --color-brand-muted: #9CA3AF;
+  /* Vibrant violet border token */
+  --color-brand-700: #5B21B6;
+  /* Soft lavender-silver subtext for high legibility on violet cards */
+  --color-brand-muted: #C4B5FD;
 
-  /* Your vivid purple flame accent */
+  /* Vivid purple flame primary action */
   --color-brand-accent: #A855F7;
+
+  /* Vivid Periwinkle navigation controls */
+  --color-brand-periwinkle: #818CF8;
+  --color-brand-periwinkle-hover: #6366F1;
+
+  /* Metallic gold pop of light */
+  --color-brand-gold: #D4AF37;
 
   /* Clean white for primary text */
   --color-brand-light: #F9FAFB;
 }
 
+html.light,
+:root.light {
+  --color-brand-900: #CEC8E0;
+  --color-brand-800: #DDD7EE;
+  --color-brand-700: #9F92C7;
+  --color-brand-muted: #3B3054;
+  --color-brand-light: #170F2E;
+  --color-brand-accent: #7E22CE;
+  --color-brand-periwinkle: #4F46E5;
+  --color-brand-periwinkle-hover: #4338CA;
+  --color-brand-gold: #B48A1E;
+  color-scheme: light;
+}
+
 html,
 body {
-  @apply bg-[var(--color-brand-900)] text-[var(--color-brand-light)] antialiased m-0 p-0;
+  @apply bg-[var(--color-brand-900)] text-[var(--color-brand-light)] antialiased m-0 p-0 transition-colors duration-200;
+}
+
+/* Rich violet surface with 25% metallic gold + 75% violet/periwinkle border sheen */
+.card-violet-gold {
+  border: 1px solid transparent;
+  background-image:
+    linear-gradient(145deg, rgba(43, 21, 82, 0.96) 0%, rgba(28, 13, 56, 0.98) 100%),
+    linear-gradient(135deg, #D4AF37 0%, #F59E0B 18%, #6D28D9 35%, #818CF8 70%, #6D28D9 100%);
+  background-origin: border-box;
+  background-clip: padding-box, border-box;
+  box-shadow:
+    inset 0 1px 0 rgba(196, 181, 253, 0.14),
+    inset 0 0 24px rgba(109, 40, 217, 0.22),
+    0 10px 25px -10px rgba(4, 2, 8, 0.75);
+}
+
+.card-violet-gold:hover {
+  background-image:
+    linear-gradient(145deg, rgba(53, 26, 99, 0.98) 0%, rgba(35, 18, 66, 0.99) 100%),
+    linear-gradient(135deg, #F59E0B 0%, #D4AF37 25%, #818CF8 55%, #A855F7 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(212, 175, 55, 0.24),
+    inset 0 0 28px rgba(168, 85, 247, 0.25),
+    0 12px 28px -10px rgba(168, 85, 247, 0.35);
+}
+
+html.light .card-violet-gold,
+:root.light .card-violet-gold {
+  background-image:
+    linear-gradient(135deg, #D5CDEA 0%, #C6BBE2 100%),
+    linear-gradient(135deg, #B48A1E 0%, #D4AF37 22%, #6D28D9 42%, #4F46E5 75%, #7E22CE 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    inset 0 0 20px rgba(126, 34, 206, 0.10),
+    0 8px 20px -8px rgba(23, 15, 46, 0.22);
+}
+
+html.light .card-violet-gold:hover,
+:root.light .card-violet-gold:hover {
+  background-image:
+    linear-gradient(135deg, #DDD7EE 0%, #CFC5E8 100%),
+    linear-gradient(135deg, #B48A1E 0%, #D4AF37 25%, #4F46E5 60%, #7E22CE 100%);
 }
