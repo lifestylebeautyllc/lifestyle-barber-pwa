@@ -44,6 +44,23 @@ function formatPhoneNumber(phone: string): string {
   return phone
 }
 
+function getFriendlyFirstName(name?: string | null): string {
+  const firstWord = (name || '').trim().split(/\s+/)[0] || ''
+  if (!firstWord || firstWord.toLowerCase().startsWith('unknown') || firstWord.includes('?')) {
+    return 'there'
+  }
+  return firstWord
+}
+
+function buildFeeReminderSmsHref(phone?: string | null, clientName?: string | null, redListedBy?: string | null): string {
+  const validPhone = cleanPhone(phone || '')
+  if (validPhone.length !== 10 || validPhone === '0000000000') return ''
+  const firstName = getFriendlyFirstName(clientName)
+  const barber = (redListedBy || '').trim() || 'your barber'
+  const body = `Hey ${firstName}, hope you're doing well! I saw you booked on my schedule at LifeStyle Barber. Just a friendly heads up—our system shows a missed appointment with ${barber} that still needs to be squared away before I can get you in my chair. Reach out to ${barber} when you can so we can get you taken care of!`
+  return `sms:+1${validPhone}?body=${encodeURIComponent(body)}`
+}
+
 function parseCSV(csvText: string): string[][] {
   const rows: string[][] = []
   let currentRow: string[] = []
@@ -1258,13 +1275,14 @@ export default function AdminDashboard() {
       }
 
       const rawPhone = cleanPhone(appt.clients?.phone || '')
+      const firstName = getFriendlyFirstName(appt.clients?.name)
       let smsDispatched = false
       if (rawPhone.length === 10 && rawPhone !== '0000000000') {
         try {
           await supabase.functions.invoke('twilio-sms', {
             body: {
               to: `+1${rawPhone}`,
-              message: `LifeStyle Barber: You missed your scheduled appointment today (${friendlyDate} at ${friendlyTime}) without 24-hour advance notice. Per our 24-hour cancellation policy, a full appointment fee is required before booking future appointments with our barbers. Please reply or contact your barber directly to settle and reopen booking. Reply STOP to opt out.`
+              message: `Hey ${firstName}, we missed you at LifeStyle Barber today with ${barberName} (${friendlyDate} at ${friendlyTime}) and wanted to make sure everything is okay! We know emergencies happen, so please let us know if something came up. As a reminder, we ask for 24 hours notice to cancel out of respect for our barbers' time, and missed spots may carry a fee before your next cut. Hope all is well! Reply STOP to unsubscribe.`
             }
           })
           smsDispatched = true
@@ -2522,10 +2540,7 @@ export default function AdminDashboard() {
                  {!selectedAppt.is_blockout && selectedAppt.clients?.is_red_listed && (() => {
                    const rlClient = selectedAppt.clients
                    const owedBarber = rlClient.red_listed_by || 'Shop'
-                   const validPhone = cleanPhone(rlClient.phone || '')
-                   const feeReminderSmsHref = validPhone.length === 10 && validPhone !== '0000000000'
-                     ? `sms:+1${validPhone}?body=${encodeURIComponent(`Hey ${rlClient.name || 'there'}, this is ${owedBarber}. Just a heads up that a missed-appointment fee is still open on your profile before we can confirm future cuts. Let me know when you'd like to settle up.`)}`
-                     : ''
+                   const feeReminderSmsHref = buildFeeReminderSmsHref(rlClient.phone, rlClient.name, rlClient.red_listed_by)
                    return (
                      <div className="bg-red-950/90 border-2 border-red-500 text-red-100 rounded-xl p-4 space-y-3 shadow-lg">
                        <div className="flex items-start justify-between gap-2">
@@ -3234,10 +3249,7 @@ export default function AdminDashboard() {
               {/* Red List Status Panel */}
               {selectedProfileClient.is_red_listed ? (() => {
                 const owedBarber = selectedProfileClient.red_listed_by || 'Shop'
-                const validPhone = cleanPhone(selectedProfileClient.phone || '')
-                const feeReminderSmsHref = validPhone.length === 10 && validPhone !== '0000000000'
-                  ? `sms:+1${validPhone}?body=${encodeURIComponent(`Hey ${selectedProfileClient.name || 'there'}, this is ${owedBarber}. Just a heads up that a missed-appointment fee is still open on your profile before we can confirm future cuts. Let me know when you'd like to settle up.`)}`
-                  : ''
+                const feeReminderSmsHref = buildFeeReminderSmsHref(selectedProfileClient.phone, selectedProfileClient.name, selectedProfileClient.red_listed_by)
                 return (
                   <div className="bg-red-950/90 border-2 border-red-500 text-red-100 rounded-xl p-4 sm:p-5 space-y-3 shadow-lg">
                     <div className="flex flex-wrap items-start justify-between gap-2">
