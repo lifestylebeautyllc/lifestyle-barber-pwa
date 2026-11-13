@@ -1,8 +1,20 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
-import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, UserX, Trash2, FileText, Clock, Ban, Search, Upload, History, CheckCircle2, Sun, Moon, ExternalLink, Delete } from 'lucide-react'
+import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, UserX, Trash2, FileText, Clock, Ban, Search, Upload, Download, Flag, AlertTriangle, History, CheckCircle2, Sun, Moon, ExternalLink, Delete } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { getAvailableSlots, getDayOfWeekFromDateString, getBarberDaySchedule, minutesToTime, DAYS_OF_WEEK, DEFAULT_WORKING_HOURS, type DaySchedule } from '../../lib/slotEngine'
+
+export interface Client {
+  id: string
+  name: string
+  phone: string
+  notes?: string | null
+  is_red_listed?: boolean
+  red_listed_by?: string | null
+  red_listed_reason?: string | null
+  no_show_count?: number
+  created_at?: string
+}
 
 const SHOP_AUTH_EMAIL = 'm.angelocantu@gmail.com'
 const ACTIVE_BARBER_STORAGE_KEY = 'lifestyle_active_barber_id'
@@ -280,15 +292,17 @@ export default function AdminDashboard() {
   const [editForm, setEditForm] = useState({ name: '', duration: '30', price: '' })
 
   // --- CLIENT DIRECTORY CRM & VAGARO CSV IMPORTER STATE ---
-  const [clientsList, setClientsList] = useState<any[]>([])
+  const [clientsList, setClientsList] = useState<Client[]>([])
   const [allAppointmentsByClient, setAllAppointmentsByClient] = useState<Record<string, any[]>>({})
   const [allShopServices, setAllShopServices] = useState<any[]>([])
   const [loadingClients, setLoadingClients] = useState(false)
   const [clientSearch, setClientSearch] = useState('')
+  const [showRedListedOnly, setShowRedListedOnly] = useState(false)
   const [visibleClientCount, setVisibleClientCount] = useState(100)
   const csvFileInputRef = useRef<HTMLInputElement>(null)
   const [isImportingCSV, setIsImportingCSV] = useState(false)
   const [csvImportResult, setCsvImportResult] = useState<string | null>(null)
+  const [statusBanner, setStatusBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
 
   // Manual Add Client Modal State
   const [showAddClientModal, setShowAddClientModal] = useState(false)
@@ -298,13 +312,16 @@ export default function AdminDashboard() {
   const [isSavingNewClient, setIsSavingNewClient] = useState(false)
 
   // Client Profile & History Modal State
-  const [selectedProfileClient, setSelectedProfileClient] = useState<any>(null)
+  const [selectedProfileClient, setSelectedProfileClient] = useState<Client | null>(null)
   const [profileName, setProfileName] = useState('')
   const [profilePhone, setProfilePhone] = useState('')
   const [profileNotes, setProfileNotes] = useState('')
   const [profileAppts, setProfileAppts] = useState<any[]>([])
   const [loadingProfileAppts, setLoadingProfileAppts] = useState(false)
   const [isSavingProfile, setIsSavingProfile] = useState(false)
+  const [manualRedListBarber, setManualRedListBarber] = useState('Michael')
+  const [manualRedListReason, setManualRedListReason] = useState('')
+  const [isUpdatingRedList, setIsUpdatingRedList] = useState(false)
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => { setSession(session); setLoading(false) })
@@ -440,7 +457,7 @@ export default function AdminDashboard() {
       setLoadingAppts(true)
       const [apptRes, overrideRes] = await Promise.all([
         supabase.from('appointments')
-          .select(`id, barber_id, appointment_date, start_time, end_time, status, notes, is_blockout, clients ( id, name, phone, notes )`)
+          .select(`id, barber_id, client_id, appointment_date, start_time, end_time, status, notes, is_blockout, clients ( id, name, phone, notes, is_red_listed, red_listed_by, red_listed_reason, no_show_count )`)
           .eq('appointment_date', selectedDate)
           .eq('barber_id', selectedBarberId)
           .neq('status', 'cancelled')
@@ -476,7 +493,7 @@ export default function AdminDashboard() {
 
       const [apptRes, overrideRes] = await Promise.all([
         supabase.from('appointments')
-          .select('id, barber_id, appointment_date, start_time, end_time, status, is_blockout, notes, clients ( id, name, phone, notes )')
+          .select('id, barber_id, client_id, appointment_date, start_time, end_time, status, is_blockout, notes, clients ( id, name, phone, notes, is_red_listed, red_listed_by, red_listed_reason, no_show_count )')
           .eq('barber_id', selectedBarberId)
           .gte('appointment_date', startOfMonth)
           .lte('appointment_date', endOfMonth)
@@ -503,7 +520,7 @@ export default function AdminDashboard() {
       const endOfWeek = `${endOfWeekDate.getFullYear()}-${String(endOfWeekDate.getMonth() + 1).padStart(2, '0')}-${String(endOfWeekDate.getDate()).padStart(2, '0')}`
 
       const [apptRes, overrideRes] = await Promise.all([
-        supabase.from('appointments').select('id, barber_id, appointment_date, start_time, end_time, status, notes, is_blockout, clients ( id, name, phone, notes )').eq('barber_id', selectedBarberId).gte('appointment_date', startOfWeek).lte('appointment_date', endOfWeek).neq('status', 'cancelled').order('start_time', { ascending: true }),
+        supabase.from('appointments').select('id, barber_id, client_id, appointment_date, start_time, end_time, status, notes, is_blockout, clients ( id, name, phone, notes, is_red_listed, red_listed_by, red_listed_reason, no_show_count )').eq('barber_id', selectedBarberId).gte('appointment_date', startOfWeek).lte('appointment_date', endOfWeek).neq('status', 'cancelled').order('start_time', { ascending: true }),
         supabase.from('schedule_overrides').select('override_date, is_off').eq('barber_id', selectedBarberId).gte('override_date', startOfWeek).lte('override_date', endOfWeek)
       ])
       setWeekAppointments(apptRes.data || [])
@@ -646,7 +663,7 @@ export default function AdminDashboard() {
   }
 
   useEffect(() => {
-    if (session && (activeModule === 'clients' || refreshTrigger > 0)) {
+    if (session && (activeModule === 'clients' || activeModule === 'calendar' || refreshTrigger > 0 || clientsList.length === 0)) {
       fetchClientsDirectory()
     }
   }, [session, activeModule, refreshTrigger])
@@ -1140,11 +1157,12 @@ export default function AdminDashboard() {
     setSelectedAppt(appt)
     setClientNotes(appt.clients?.notes || '')
     setShowApptModal(true)
-    if (appt?.clients?.id) {
+    const targetClientId = appt?.clients?.id || appt?.client_id
+    if (targetClientId) {
       const { data: freshClient } = await supabase
         .from('clients')
-        .select('id, name, phone, notes')
-        .eq('id', appt.clients.id)
+        .select('id, name, phone, notes, is_red_listed, red_listed_by, red_listed_reason, no_show_count')
+        .eq('id', targetClientId)
         .maybeSingle()
       if (freshClient) {
         setClientNotes(freshClient.notes || '')
@@ -1203,11 +1221,182 @@ export default function AdminDashboard() {
     try {
       const { error } = await supabase.from('appointments').update({ status: 'no-show' }).eq('id', appt.id)
       if (error) throw error
+
+      const matchedBarber = barbers.find(b => b.id === appt.barber_id) || barbers.find(b => b.id === selectedBarberId)
+      const barberName = matchedBarber?.name ? matchedBarber.name.split(' ')[0] : 'Your Barber'
+      const friendlyDate = new Date(`${appt.appointment_date}T00:00:00Z`).toLocaleDateString('en-US', {
+        month: 'long',
+        day: 'numeric',
+        year: 'numeric',
+        timeZone: 'UTC',
+      })
+      const friendlyTime = formatTime(appt.start_time)
+      const clientId = appt.clients?.id || appt.client_id
+
+      if (clientId) {
+        let currentNoShowCount = appt.clients?.no_show_count || 0
+        const { data: latestClient } = await supabase
+          .from('clients')
+          .select('no_show_count')
+          .eq('id', clientId)
+          .maybeSingle()
+        if (latestClient && typeof latestClient.no_show_count === 'number') {
+          currentNoShowCount = latestClient.no_show_count
+        }
+
+        const redListReason = `No-Call / No-Show on ${friendlyDate} (${friendlyTime}) with ${barberName}`
+        const { error: clientUpdateErr } = await supabase
+          .from('clients')
+          .update({
+            is_red_listed: true,
+            red_listed_by: barberName,
+            red_listed_reason: redListReason,
+            no_show_count: currentNoShowCount + 1,
+          })
+          .eq('id', clientId)
+        if (clientUpdateErr) throw clientUpdateErr
+      }
+
+      const rawPhone = cleanPhone(appt.clients?.phone || '')
+      let smsDispatched = false
+      if (rawPhone.length === 10 && rawPhone !== '0000000000') {
+        try {
+          await supabase.functions.invoke('twilio-sms', {
+            body: {
+              to: `+1${rawPhone}`,
+              message: `LifeStyle Barber: You missed your scheduled appointment today (${friendlyDate} at ${friendlyTime}) without 24-hour advance notice. Per our 24-hour cancellation policy, a full appointment fee is required before booking future appointments with our barbers. Please reply or contact your barber directly to settle and reopen booking. Reply STOP to opt out.`
+            }
+          })
+          smsDispatched = true
+        } catch (smsErr) {
+          console.warn('No-show policy SMS skipped or failed:', smsErr)
+        }
+      }
+
+      const clientLabel = appt.clients?.name || 'Client'
+      setStatusBanner({
+        type: 'success',
+        message: smsDispatched
+          ? `${clientLabel} marked as No-Show, Red-Listed (Owes ${barberName}), and sent the 24-hour policy SMS.`
+          : `${clientLabel} marked as No-Show and Red-Listed (Owes ${barberName}). No valid phone on file for SMS.`
+      })
       setShowApptModal(false)
       setSelectedAppt(null)
       setRefreshTrigger(prev => prev + 1)
-    } catch (err) { console.error(err); alert("Failed to mark no-show.") }
-    finally { setIsUpdatingAppt(false) }
+    } catch (err) {
+      console.error(err)
+      alert('Failed to mark no-show.')
+    } finally {
+      setIsUpdatingAppt(false)
+    }
+  }
+
+  const handleClearRedList = async (clientId: string, clientLabel?: string) => {
+    if (!clientId) return
+    setIsUpdatingRedList(true)
+    setIsUpdatingAppt(true)
+    try {
+      const { error } = await supabase
+        .from('clients')
+        .update({
+          is_red_listed: false,
+          red_listed_by: null,
+          red_listed_reason: null,
+        })
+        .eq('id', clientId)
+      if (error) throw error
+
+      setClientsList(prev => prev.map(c => c.id === clientId ? { ...c, is_red_listed: false, red_listed_by: null, red_listed_reason: null } : c))
+      setSelectedAppt((prev: any) => prev?.clients?.id === clientId ? { ...prev, clients: { ...prev.clients, is_red_listed: false, red_listed_by: null, red_listed_reason: null } } : prev)
+      setSelectedProfileClient(prev => prev?.id === clientId ? { ...prev, is_red_listed: false, red_listed_by: null, red_listed_reason: null } : prev)
+      setRefreshTrigger(prev => prev + 1)
+      setStatusBanner({
+        type: 'success',
+        message: `${clientLabel || 'Client'} cleared from the Red List.`
+      })
+    } catch (err: any) {
+      console.error('Failed to clear Red List:', err)
+      alert(`Failed to clear Red List: ${err?.message || 'Database error'}`)
+    } finally {
+      setIsUpdatingRedList(false)
+      setIsUpdatingAppt(false)
+    }
+  }
+
+  const handleManualRedList = async (clientId: string, owedBarber: string, reasonInput?: string, clientLabel?: string) => {
+    if (!clientId) return
+    const barberLabel = (owedBarber || 'Michael').trim()
+    const finalReason = (reasonInput || '').trim() || `Manual Red List Flag by ${barberLabel}`
+    setIsUpdatingRedList(true)
+    setIsUpdatingAppt(true)
+    try {
+      const { error } = await supabase
+        .from('clients')
+        .update({
+          is_red_listed: true,
+          red_listed_by: barberLabel,
+          red_listed_reason: finalReason,
+        })
+        .eq('id', clientId)
+      if (error) throw error
+
+      setClientsList(prev => prev.map(c => c.id === clientId ? { ...c, is_red_listed: true, red_listed_by: barberLabel, red_listed_reason: finalReason } : c))
+      setSelectedAppt((prev: any) => prev?.clients?.id === clientId ? { ...prev, clients: { ...prev.clients, is_red_listed: true, red_listed_by: barberLabel, red_listed_reason: finalReason } } : prev)
+      setSelectedProfileClient(prev => prev?.id === clientId ? { ...prev, is_red_listed: true, red_listed_by: barberLabel, red_listed_reason: finalReason } : prev)
+      setManualRedListReason('')
+      setRefreshTrigger(prev => prev + 1)
+      setStatusBanner({
+        type: 'success',
+        message: `${clientLabel || 'Client'} added to the Red List (Owes ${barberLabel}).`
+      })
+    } catch (err: any) {
+      console.error('Failed to Red List client:', err)
+      alert(`Failed to Red List client: ${err?.message || 'Database error'}`)
+    } finally {
+      setIsUpdatingRedList(false)
+      setIsUpdatingAppt(false)
+    }
+  }
+
+  const handleExportBackupCSV = () => {
+    const csvEscape = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`
+    const headers = [
+      'Name',
+      'Phone',
+      'Persistent Cut Notes',
+      'Total Appointments',
+      'No-Show Count',
+      'Red Listed',
+      'Red Listed By',
+      'Red List Reason',
+    ]
+
+    const rows = clientsList.map(client => {
+      const apptCount = (allAppointmentsByClient[client.id] || []).length
+      return [
+        csvEscape(client.name || ''),
+        csvEscape(formatPhoneNumber(client.phone || '')),
+        csvEscape(client.notes || ''),
+        csvEscape(apptCount),
+        csvEscape(client.no_show_count || 0),
+        csvEscape(client.is_red_listed ? 'Yes' : 'No'),
+        csvEscape(client.red_listed_by || ''),
+        csvEscape(client.red_listed_reason || ''),
+      ].join(',')
+    })
+
+    const csvContent = [headers.map(csvEscape).join(','), ...rows].join('\r\n')
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const now = new Date()
+    const dateStamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `lifestyle-barber-clients-backup-${dateStamp}.csv`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
   }
 
   // --- VAGARO CSV PARSER & BULK UPSERT UTILITY ---
@@ -1446,11 +1635,14 @@ export default function AdminDashboard() {
     }
   }
 
-  const handleOpenClientProfile = async (client: any) => {
+  const handleOpenClientProfile = async (client: Client) => {
+    const activeBarberName = barbers.find(b => b.id === selectedBarberId)?.name?.split(' ')[0] || 'Michael'
     setSelectedProfileClient(client)
     setProfileName(client.name || '')
     setProfilePhone(formatPhoneNumber(client.phone || ''))
     setProfileNotes(client.notes || '')
+    setManualRedListBarber(client.red_listed_by || activeBarberName)
+    setManualRedListReason(client.red_listed_reason || '')
 
     const cachedAppts = allAppointmentsByClient[client.id] || []
     setProfileAppts(cachedAppts)
@@ -2174,6 +2366,8 @@ export default function AdminDashboard() {
           const isBlockout = Boolean(appt.is_blockout)
           const isBlocked = appt.status === 'blocked' || isBlockout
           const isCompleted = appt.status === 'completed'
+          const isRedListed = !isBlockout && !isBlocked && Boolean(appt.clients?.is_red_listed)
+          const redListedOwedBy = (appt.clients?.red_listed_by || 'BARBER').toUpperCase()
           const isThisBeingDragged = touchDraggedAppt?.id === appt.id
 
           const colorClasses = isBlockout
@@ -2183,6 +2377,8 @@ export default function AdminDashboard() {
             : isCompleted
             ? (isLight ? 'bg-[#C7DEC9] border-[#2E7D4F] text-[#052E16] shadow-sm' : 'bg-emerald-950/90 border-emerald-500/80 text-emerald-200')
             : 'bg-[var(--color-brand-800)] border-[var(--color-brand-accent)] border-t-[#D4AF37]/70 text-[var(--color-brand-light)] shadow-md'
+
+          const redListCardClass = isRedListed ? '!border-red-500 ring-1 ring-red-500/60' : ''
 
           if (isWeekView) {
             return (
@@ -2202,7 +2398,7 @@ export default function AdminDashboard() {
                   isThisBeingDragged
                     ? 'scale-105 shadow-2xl ring-2 ring-[var(--color-brand-accent)] z-30 opacity-80 animate-pulse touch-none'
                     : 'touch-pan-y'
-                } ${colorClasses}`}
+                } ${colorClasses} ${redListCardClass}`}
                 style={{
                   top: `${top}px`,
                   height: `${height}px`,
@@ -2210,13 +2406,17 @@ export default function AdminDashboard() {
                 }}
               >
                 <div className="text-[9px] sm:text-[10px] font-bold leading-tight truncate overflow-hidden whitespace-nowrap w-full pointer-events-none">
-                  {formatTime(appt.start_time).replace(':00', '')} {isBlockout ? (appt.notes || 'Blocked') : isBlocked ? 'BLOCKED' : appt.clients?.name || 'Walk-In'}
+                  {isRedListed ? '🚩 ' : ''}{formatTime(appt.start_time).replace(':00', '')} {isBlockout ? (appt.notes || 'Blocked') : isBlocked ? 'BLOCKED' : appt.clients?.name || 'Walk-In'}
                 </div>
-                {height >= 35 && (
+                {isRedListed && height >= 28 ? (
+                  <div className="text-[8px] font-extrabold bg-red-600 text-white px-1 py-px rounded truncate leading-tight mt-0.5 w-fit max-w-full pointer-events-none">
+                    🚩 RED LIST • OWES {redListedOwedBy}
+                  </div>
+                ) : height >= 35 ? (
                   <div className="text-[8px] sm:text-[9px] opacity-75 truncate overflow-hidden whitespace-nowrap leading-none mt-0.5 w-full pointer-events-none">
                     {isBlockout ? formatTime(appt.end_time).replace(':00', '') : isBlocked ? 'Blocked' : formatTime(appt.end_time).replace(':00', '')}
                   </div>
-                )}
+                ) : null}
               </button>
             )
           }
@@ -2238,7 +2438,7 @@ export default function AdminDashboard() {
                 isThisBeingDragged
                   ? 'scale-105 shadow-2xl ring-2 ring-[var(--color-brand-accent)] z-30 opacity-80 animate-pulse touch-none'
                   : 'touch-pan-y'
-              } ${colorClasses}`}
+              } ${colorClasses} ${redListCardClass}`}
               style={{
                 top: `${top}px`,
                 height: `${height}px`,
@@ -2249,6 +2449,7 @@ export default function AdminDashboard() {
                 <div className="flex items-center justify-between text-xs font-bold leading-none pointer-events-none">
                   <span className="truncate flex items-center gap-1">
                     {isBlockout ? <Ban className={`w-3 h-3 flex-shrink-0 ${isLight ? 'text-slate-600' : 'text-zinc-400'}`} /> : isBlocked && <Lock className={`w-3 h-3 flex-shrink-0 ${isLight ? 'text-orange-600' : 'text-orange-400'}`} />}
+                    {isRedListed && <span className="bg-red-600 text-white text-[9px] font-extrabold px-1 rounded flex-shrink-0">🚩 RED LIST • OWES {redListedOwedBy}</span>}
                     {isBlockout ? (appt.notes || 'Blocked Time') : isBlocked ? 'BLOCKED TIME' : appt.clients?.name || 'Walk-In'}
                   </span>
                   <span className="text-[10px] opacity-80 flex-shrink-0 ml-1">
@@ -2257,14 +2458,21 @@ export default function AdminDashboard() {
                 </div>
               ) : (
                 <div className="pointer-events-none flex flex-col h-full">
-                  <div className={`text-xs font-bold flex items-center justify-between ${
+                  <div className={`text-xs font-bold flex items-center justify-between gap-1 ${
                     isBlockout ? (isLight ? 'text-slate-600' : 'text-zinc-400') : isBlocked ? (isLight ? 'text-orange-700' : 'text-orange-400') : isCompleted ? (isLight ? 'text-emerald-700' : 'text-emerald-400') : 'text-[var(--color-brand-accent)]'
                   }`}>
-                    <span className="flex items-center gap-1">
+                    <span className="flex items-center gap-1 truncate">
                       {isBlockout ? <Ban className="w-3 h-3 flex-shrink-0" /> : isBlocked && <Lock className="w-3 h-3 flex-shrink-0" />}
                       {formatTime(appt.start_time)} - {formatTime(appt.end_time)}
                     </span>
-                    {appt.notes && !isBlockout && <FileText className="w-3 h-3 flex-shrink-0 opacity-80" />}
+                    <span className="flex items-center gap-1 flex-shrink-0">
+                      {isRedListed && (
+                        <span className="bg-red-600 text-white text-[9px] sm:text-[10px] font-extrabold px-1.5 py-0.5 rounded shadow-sm whitespace-nowrap">
+                          🚩 RED LIST • OWES {redListedOwedBy}
+                        </span>
+                      )}
+                      {appt.notes && !isBlockout && <FileText className="w-3 h-3 flex-shrink-0 opacity-80" />}
+                    </span>
                   </div>
                   <div className={`text-xs truncate font-bold mt-0.5 ${isBlockout ? (isLight ? 'text-slate-800' : 'text-zinc-200') : 'text-[var(--color-brand-light)]'}`}>
                     {isBlockout ? (appt.notes || 'Blocked Time') : isBlocked ? 'BLOCKED TIME' : appt.clients?.name || 'Walk-In'}
@@ -2310,6 +2518,53 @@ export default function AdminDashboard() {
               </div>
 
               <div className="p-6 space-y-5 overflow-y-auto flex-1">
+                 {/* Red List Warning Alert & Fee Recovery Controls */}
+                 {!selectedAppt.is_blockout && selectedAppt.clients?.is_red_listed && (() => {
+                   const rlClient = selectedAppt.clients
+                   const owedBarber = rlClient.red_listed_by || 'Shop'
+                   const validPhone = cleanPhone(rlClient.phone || '')
+                   const feeReminderSmsHref = validPhone.length === 10 && validPhone !== '0000000000'
+                     ? `sms:+1${validPhone}?body=${encodeURIComponent(`Hey ${rlClient.name || 'there'}, this is ${owedBarber}. Just a heads up that a missed-appointment fee is still open on your profile before we can confirm future cuts. Let me know when you'd like to settle up.`)}`
+                     : ''
+                   return (
+                     <div className="bg-red-950/90 border-2 border-red-500 text-red-100 rounded-xl p-4 space-y-3 shadow-lg">
+                       <div className="flex items-start justify-between gap-2">
+                         <div>
+                           <p className="text-sm font-extrabold tracking-wide text-red-200">
+                             🚩 RED LISTED BY {owedBarber}
+                           </p>
+                           <p className="text-xs text-red-100/90 mt-1">
+                             {rlClient.red_listed_reason || 'No-Call / No-Show balance due before next cut.'}
+                           </p>
+                         </div>
+                         <span className="text-[11px] font-extrabold bg-red-600 text-white px-2 py-0.5 rounded-full whitespace-nowrap">
+                           No-Shows: {rlClient.no_show_count || 0}
+                         </span>
+                       </div>
+                       <div className="flex flex-wrap gap-2 pt-1">
+                         {feeReminderSmsHref && (
+                           <a
+                             href={feeReminderSmsHref}
+                             className="flex-1 min-w-[140px] bg-red-600 hover:bg-red-500 text-white text-xs font-bold py-2.5 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-colors"
+                           >
+                             <MessageSquare className="w-3.5 h-3.5" />
+                             <span>Text Fee Reminder</span>
+                           </a>
+                         )}
+                         <button
+                           type="button"
+                           disabled={isUpdatingRedList || isUpdatingAppt}
+                           onClick={() => handleClearRedList(rlClient.id, rlClient.name)}
+                           className="flex-1 min-w-[130px] bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold py-2.5 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                         >
+                           <CheckCircle2 className="w-3.5 h-3.5" />
+                           <span>Clear Red List</span>
+                         </button>
+                       </div>
+                     </div>
+                   )
+                 })()}
+
                  {/* Contact Buttons */}
                  {!selectedAppt.is_blockout && selectedAppt.clients?.phone && selectedAppt.clients.phone !== '0000000000' && (
                    <div className="flex gap-3">
@@ -2384,7 +2639,7 @@ export default function AdminDashboard() {
                    </label>
                    <div className={selectedAppt.is_blockout ? 'grid grid-cols-1 gap-2' : 'grid grid-cols-2 gap-2'}>
                      {!selectedAppt.is_blockout && (
-                       <button onClick={handleNoShow} disabled={isUpdatingAppt} className="flex flex-col items-center justify-center gap-1 py-4 rounded-xl border border-[var(--color-brand-700)] hover:bg-red-900/20 hover:border-red-500 hover:text-red-400 transition-colors cursor-pointer">
+                       <button onClick={handleNoShow} disabled={isUpdatingAppt} className="flex flex-col items-center justify-center gap-1 py-4 rounded-xl border border-[var(--color-brand-700)] hover:bg-red-900/20 hover:border-red-500 hover:text-red-400 transition-colors cursor-pointer disabled:opacity-50">
                          <UserX className="w-5 h-5" />
                          <span className="text-xs font-bold">No-Show</span>
                        </button>
@@ -2394,6 +2649,20 @@ export default function AdminDashboard() {
                        <span className="text-xs font-bold">{selectedAppt.is_blockout ? 'Remove Blockout' : 'Delete'}</span>
                      </button>
                    </div>
+                   {!selectedAppt.is_blockout && selectedAppt.clients?.id && selectedAppt.clients?.phone !== '0000000000' && !selectedAppt.clients?.is_red_listed && (() => {
+                     const apptBarberName = (barbers.find(b => b.id === selectedAppt.barber_id) || barbers.find(b => b.id === selectedBarberId))?.name?.split(' ')[0] || 'Michael'
+                     return (
+                       <button
+                         type="button"
+                         disabled={isUpdatingRedList || isUpdatingAppt}
+                         onClick={() => handleManualRedList(selectedAppt.clients.id, apptBarberName, `Manual Red List Flag by ${apptBarberName}`, selectedAppt.clients.name)}
+                         className="w-full mt-2 py-3 rounded-xl border border-red-500/50 bg-red-950/30 hover:bg-red-600 hover:text-white text-red-400 text-xs font-bold transition-colors cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2"
+                       >
+                         <Flag className="w-4 h-4" />
+                         <span>🚩 Red List Client</span>
+                       </button>
+                     )
+                   })()}
                  </div>
 
               </div>
@@ -2504,6 +2773,25 @@ export default function AdminDashboard() {
                      </div>
 
                      <div className="space-y-3 pt-4 border-t border-[var(--color-brand-700)]">
+                        {(() => {
+                          const cleanedBookPhone = cleanPhone(clientPhone)
+                          const trimmedBookName = clientName.trim().toLowerCase()
+                          const matchedRedListedClient = clientsList.find((c) => {
+                            if (!c.is_red_listed) return false
+                            if (cleanedBookPhone.length === 10 && cleanPhone(c.phone || '') === cleanedBookPhone) return true
+                            if (trimmedBookName.length >= 3 && (c.name || '').trim().toLowerCase() === trimmedBookName) return true
+                            return false
+                          })
+                          if (!matchedRedListedClient) return null
+                          return (
+                            <div className="bg-red-950/90 border-2 border-red-500 text-red-100 rounded-xl p-3 text-xs font-bold flex items-start gap-2.5 shadow-md">
+                              <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                              <span>
+                                🚩 Heads up: {matchedRedListedClient.name} is RED LISTED (Owes {matchedRedListedClient.red_listed_by || 'a barber'} — {matchedRedListedClient.red_listed_reason || 'Missed appointment fee required'}).
+                              </span>
+                            </div>
+                          )
+                        })()}
                         <div className="relative">
                           <User className="w-4 h-4 text-[var(--color-brand-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
                           <input
@@ -2943,6 +3231,93 @@ export default function AdminDashboard() {
 
             {/* Modal Scrollable Body */}
             <div className="p-5 sm:p-6 space-y-6 overflow-y-auto flex-1">
+              {/* Red List Status Panel */}
+              {selectedProfileClient.is_red_listed ? (() => {
+                const owedBarber = selectedProfileClient.red_listed_by || 'Shop'
+                const validPhone = cleanPhone(selectedProfileClient.phone || '')
+                const feeReminderSmsHref = validPhone.length === 10 && validPhone !== '0000000000'
+                  ? `sms:+1${validPhone}?body=${encodeURIComponent(`Hey ${selectedProfileClient.name || 'there'}, this is ${owedBarber}. Just a heads up that a missed-appointment fee is still open on your profile before we can confirm future cuts. Let me know when you'd like to settle up.`)}`
+                  : ''
+                return (
+                  <div className="bg-red-950/90 border-2 border-red-500 text-red-100 rounded-xl p-4 sm:p-5 space-y-3 shadow-lg">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div>
+                        <h3 className="text-sm font-extrabold text-red-200 tracking-wide">
+                          🚩 RED LIST STATUS • OWES {owedBarber.toUpperCase()}
+                        </h3>
+                        <p className="text-xs text-red-100/90 mt-1">
+                          {selectedProfileClient.red_listed_reason || 'No-Call / No-Show balance open'}
+                        </p>
+                      </div>
+                      <span className="text-[11px] font-extrabold bg-red-600 text-white px-2.5 py-0.5 rounded-full">
+                        No-Shows: {selectedProfileClient.no_show_count || 0}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-2.5 pt-1">
+                      {feeReminderSmsHref && (
+                        <a
+                          href={feeReminderSmsHref}
+                          className="flex-1 min-w-[150px] bg-red-600 hover:bg-red-500 text-white text-xs sm:text-sm font-bold py-2.5 px-3 rounded-xl flex items-center justify-center gap-2 transition-colors"
+                        >
+                          <MessageSquare className="w-4 h-4" />
+                          <span>Text Fee Reminder</span>
+                        </a>
+                      )}
+                      <button
+                        type="button"
+                        disabled={isUpdatingRedList}
+                        onClick={() => handleClearRedList(selectedProfileClient.id, selectedProfileClient.name)}
+                        className="flex-1 min-w-[190px] bg-emerald-600 hover:bg-emerald-500 text-white text-xs sm:text-sm font-bold py-2.5 px-3 rounded-xl flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>{isUpdatingRedList ? 'Updating...' : 'Clear Red List (Mark Paid/Resolved)'}</span>
+                      </button>
+                    </div>
+                  </div>
+                )
+              })() : (
+                <div className="bg-[var(--color-brand-900)]/90 border border-[var(--color-brand-700)] rounded-xl p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider flex items-center gap-1.5">
+                      <Flag className="w-3.5 h-3.5 text-red-400" />
+                      Red List Status
+                    </h3>
+                    {(selectedProfileClient.no_show_count || 0) > 0 && (
+                      <span className="text-[11px] font-bold text-red-400 bg-red-950/50 border border-red-500/40 px-2 py-0.5 rounded-full">
+                        Past No-Shows: {selectedProfileClient.no_show_count}
+                      </span>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <select
+                      value={manualRedListBarber}
+                      onChange={(e) => setManualRedListBarber(e.target.value)}
+                      className="bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-lg px-3 py-2 text-xs font-bold text-[var(--color-brand-light)] outline-none focus:border-red-500 cursor-pointer"
+                    >
+                      {['Michael', 'Matt', 'Flor'].map(name => (
+                        <option key={name} value={name}>Owes {name}</option>
+                      ))}
+                    </select>
+                    <input
+                      type="text"
+                      placeholder="Reason (e.g. No-show / balance owed)"
+                      value={manualRedListReason}
+                      onChange={(e) => setManualRedListReason(e.target.value)}
+                      className="sm:col-span-2 bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-lg px-3 py-2 text-xs text-[var(--color-brand-light)] outline-none focus:border-red-500"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    disabled={isUpdatingRedList}
+                    onClick={() => handleManualRedList(selectedProfileClient.id, manualRedListBarber, manualRedListReason, selectedProfileClient.name)}
+                    className="w-full sm:w-auto px-4 py-2 rounded-lg border border-red-500/60 bg-red-950/30 hover:bg-red-600 hover:text-white text-red-400 text-xs font-bold transition-colors cursor-pointer disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
+                  >
+                    <Flag className="w-3.5 h-3.5" />
+                    <span>{isUpdatingRedList ? 'Flagging...' : '🚩 Red List Client'}</span>
+                  </button>
+                </div>
+              )}
+
               {/* Quick Call / Text Actions */}
               {selectedProfileClient.phone && selectedProfileClient.phone !== '0000000000' && (
                 <div className="flex gap-3">
@@ -3122,6 +3497,7 @@ export default function AdminDashboard() {
           const isBlockout = Boolean(touchDraggedAppt.is_blockout)
           const isBlocked = touchDraggedAppt.status === 'blocked' || isBlockout
           const isCompleted = touchDraggedAppt.status === 'completed'
+          const isRedListed = !isBlockout && !isBlocked && Boolean(touchDraggedAppt.clients?.is_red_listed)
           const colorClasses = isBlockout
             ? (isLight ? 'bg-[#C4BBE0] border-[#8273AD] ring-[#8273AD]/50 text-[#170F2E]' : 'bg-zinc-800 border-zinc-600 ring-zinc-500/50 text-zinc-200')
             : isBlocked
@@ -3132,7 +3508,7 @@ export default function AdminDashboard() {
 
           return (
             <div
-              className={`fixed z-50 pointer-events-none -translate-x-1/2 -translate-y-full mb-3 px-3.5 py-2 rounded-xl text-xs font-bold shadow-[0_20px_45px_rgba(0,0,0,0.45)] border-2 ring-2 select-none scale-105 transition-transform flex flex-col justify-between overflow-hidden min-w-[170px] max-w-[240px] ${colorClasses}`}
+              className={`fixed z-50 pointer-events-none -translate-x-1/2 -translate-y-full mb-3 px-3.5 py-2 rounded-xl text-xs font-bold shadow-[0_20px_45px_rgba(0,0,0,0.45)] border-2 ring-2 select-none scale-105 transition-transform flex flex-col justify-between overflow-hidden min-w-[170px] max-w-[240px] ${colorClasses} ${isRedListed ? '!border-red-500 !ring-red-500/70' : ''}`}
               style={{
                 left: `${touchPos.x}px`,
                 top: `${touchPos.y - 12}px`,
@@ -3306,6 +3682,22 @@ export default function AdminDashboard() {
           </div>
         </header>
 
+        {statusBanner && (
+          <div className="bg-[var(--color-brand-800)] border-b border-emerald-500/60 px-4 py-2.5 flex items-center justify-between gap-3 z-30 flex-shrink-0 shadow-sm">
+            <div className="flex items-center gap-2 text-xs sm:text-sm text-[var(--color-brand-light)] font-semibold">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+              <span>{statusBanner.message}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setStatusBanner(null)}
+              className="text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer flex-shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
         {/* CALENDAR MAIN BODY (w-full flex-1 edge-to-edge) */}
         <main className="w-full flex-1 overflow-hidden flex flex-col relative">
           {/* DAY VIEW */}
@@ -3456,6 +3848,8 @@ export default function AdminDashboard() {
                             const isBlockout = Boolean(appt.is_blockout)
                             const isBlocked = appt.status === 'blocked' || isBlockout
                             const isCompleted = appt.status === 'completed'
+                            const isRedListed = !isBlockout && !isBlocked && Boolean(appt.clients?.is_red_listed)
+                            const redListedOwedBy = (appt.clients?.red_listed_by || 'BARBER').toUpperCase()
                             const chipBg = isBlockout
                               ? (isLight ? 'bg-[#C4BBE0] border-[#8273AD] text-[#170F2E]' : 'bg-zinc-800 border-zinc-600 text-zinc-300')
                               : isBlocked
@@ -3467,11 +3861,16 @@ export default function AdminDashboard() {
                             return (
                               <div
                                 key={appt.id}
-                                className={`text-[10px] truncate px-1.5 py-0.5 rounded border font-medium flex items-center gap-1 ${chipBg}`}
+                                className={`text-[10px] truncate px-1.5 py-0.5 rounded border font-medium flex items-center gap-1 ${chipBg} ${isRedListed ? '!border-red-500 ring-1 ring-red-500/60' : ''}`}
                               >
                                 <span className={`${isBlockout ? (isLight ? 'text-slate-600' : 'text-zinc-400') : 'text-[var(--color-brand-accent)]'} font-bold text-[9px] flex-shrink-0`}>
                                   {formatTime(appt.start_time).replace(':00', '')}
                                 </span>
+                                {isRedListed && (
+                                  <span className="bg-red-600 text-white text-[8px] font-extrabold px-1 rounded flex-shrink-0">
+                                    🚩 RED LIST • OWES {redListedOwedBy}
+                                  </span>
+                                )}
                                 <span className="truncate">
                                   {isBlockout ? (appt.notes || 'Blocked') : isBlocked ? 'Blocked' : appt.clients?.name || 'Walk-In'}
                                 </span>
@@ -3577,6 +3976,22 @@ export default function AdminDashboard() {
             </div>
           )}
         </header>
+
+        {statusBanner && (
+          <div className="mb-6 bg-[var(--color-brand-800)] border border-emerald-500/60 rounded-xl p-3.5 flex items-center justify-between gap-3 shadow-md">
+            <div className="flex items-center gap-2.5 text-xs sm:text-sm text-[var(--color-brand-light)] font-semibold">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+              <span>{statusBanner.message}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setStatusBanner(null)}
+              className="text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
 
         {/* --- MAIN MODULE NAVIGATION --- */}
         {activeModule === 'home' && (
@@ -3781,8 +4196,10 @@ export default function AdminDashboard() {
         {activeModule === 'clients' && (() => {
           const q = clientSearch.trim().toLowerCase()
           const qDigits = cleanPhone(clientSearch)
+          const redListedCount = clientsList.filter(c => Boolean(c.is_red_listed)).length
 
           const filteredClients = clientsList.filter((client) => {
+            if (showRedListedOnly && !client.is_red_listed) return false
             if (!q) return true
             const nameMatch = (client.name || '').toLowerCase().includes(q)
             const rawPhone = cleanPhone(client.phone || '')
@@ -3840,6 +4257,16 @@ export default function AdminDashboard() {
 
                   <button
                     type="button"
+                    onClick={handleExportBackupCSV}
+                    disabled={clientsList.length === 0}
+                    className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-gold)] text-[var(--color-brand-light)] px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    <Download className="w-4 h-4 text-[var(--color-brand-gold)]" />
+                    <span>Export Backup CSV</span>
+                  </button>
+
+                  <button
+                    type="button"
                     onClick={() => setShowAddClientModal(true)}
                     className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 bg-[var(--color-brand-accent)] text-white px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold hover:brightness-110 transition-all cursor-pointer shadow-md"
                   >
@@ -3866,28 +4293,45 @@ export default function AdminDashboard() {
                 </div>
               )}
 
-              {/* Real-Time Search Bar */}
-              <div className="relative">
-                <Search className="w-4 h-4 text-[var(--color-brand-muted)] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                <input
-                  type="text"
-                  placeholder="Search clients by name, phone number, or cut notes..."
-                  value={clientSearch}
-                  onChange={(e) => {
-                    setClientSearch(e.target.value)
+              {/* Real-Time Search Bar + Red Listed Filter Toggle */}
+              <div className="flex flex-col sm:flex-row gap-2.5">
+                <div className="relative flex-1">
+                  <Search className="w-4 h-4 text-[var(--color-brand-muted)] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="text"
+                    placeholder="Search clients by name, phone number, or cut notes..."
+                    value={clientSearch}
+                    onChange={(e) => {
+                      setClientSearch(e.target.value)
+                      setVisibleClientCount(100)
+                    }}
+                    className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] focus:border-[var(--color-brand-accent)] rounded-xl py-3 pl-10 pr-10 text-sm text-[var(--color-brand-light)] outline-none transition-colors"
+                  />
+                  {clientSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setClientSearch('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowRedListedOnly(prev => !prev)
                     setVisibleClientCount(100)
                   }}
-                  className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] focus:border-[var(--color-brand-accent)] rounded-xl py-3 pl-10 pr-10 text-sm text-[var(--color-brand-light)] outline-none transition-colors"
-                />
-                {clientSearch && (
-                  <button
-                    type="button"
-                    onClick={() => setClientSearch('')}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                )}
+                  className={`px-4 py-3 rounded-xl border text-xs sm:text-sm font-bold whitespace-nowrap transition-all cursor-pointer flex items-center justify-center gap-2 ${
+                    showRedListedOnly
+                      ? 'bg-red-600 border-red-500 text-white shadow-md'
+                      : 'bg-[var(--color-brand-900)] border-red-500/40 text-red-400 hover:border-red-500 hover:bg-red-950/30'
+                  }`}
+                >
+                  <span>🚩 Red Listed ({redListedCount})</span>
+                </button>
               </div>
 
               {/* Client List */}
@@ -3899,10 +4343,12 @@ export default function AdminDashboard() {
                 <div className="text-center py-12 text-[var(--color-brand-muted)] bg-[var(--color-brand-900)] rounded-xl border border-dashed border-[var(--color-brand-700)] p-6">
                   <Users className="w-8 h-8 text-[var(--color-brand-muted)] mx-auto mb-2 opacity-60" />
                   <p className="font-bold text-[var(--color-brand-light)] text-sm">
-                    {clientSearch ? 'No matching clients found' : 'No clients in directory yet'}
+                    {showRedListedOnly ? 'No red-listed clients found' : clientSearch ? 'No matching clients found' : 'No clients in directory yet'}
                   </p>
                   <p className="text-xs mt-1">
-                    {clientSearch
+                    {showRedListedOnly
+                      ? 'Clear the Red Listed filter to view all clients.'
+                      : clientSearch
                       ? 'Try searching a different name, phone digit, or note keyword.'
                       : 'Import your Vagaro CSV or tap "+ Add Client" to add your first client.'}
                   </p>
@@ -3912,16 +4358,24 @@ export default function AdminDashboard() {
                   {displayedClients.map((client) => {
                     const clientAppts = allAppointmentsByClient[client.id] || []
                     const apptCount = clientAppts.length
+                    const isRedListed = Boolean(client.is_red_listed)
+                    const owedBarberLabel = (client.red_listed_by || 'BARBER').toUpperCase()
 
                     return (
                       <button
                         key={client.id}
                         type="button"
                         onClick={() => handleOpenClientProfile(client)}
-                        className="w-full card-violet-gold rounded-xl p-4 text-left transition-all cursor-pointer group flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                        className={`w-full card-violet-gold rounded-xl p-4 text-left transition-all cursor-pointer group flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                          isRedListed ? '!border-red-500 ring-1 ring-red-500/60' : ''
+                        }`}
                       >
                         <div className="flex items-start gap-3.5 min-w-0 flex-1">
-                          <div className="w-10 h-10 rounded-full bg-[var(--color-brand-900)] border border-[#D4AF37]/60 shadow-[0_0_8px_rgba(212,175,55,0.2)] flex items-center justify-center text-[var(--color-brand-gold)] font-bold text-sm flex-shrink-0 mt-0.5 transition-colors">
+                          <div className={`w-10 h-10 rounded-full bg-[var(--color-brand-900)] border flex items-center justify-center font-bold text-sm flex-shrink-0 mt-0.5 transition-colors ${
+                            isRedListed
+                              ? 'border-red-500 text-red-400 shadow-[0_0_8px_rgba(239,68,68,0.3)]'
+                              : 'border-[#D4AF37]/60 shadow-[0_0_8px_rgba(212,175,55,0.2)] text-[var(--color-brand-gold)]'
+                          }`}>
                             {(client.name || 'C').charAt(0).toUpperCase()}
                           </div>
 
@@ -3933,6 +4387,16 @@ export default function AdminDashboard() {
                               <span className="text-xs font-mono text-[var(--color-brand-muted)] bg-[var(--color-brand-900)]/60 px-2 py-0.5 rounded border border-[var(--color-brand-700)]">
                                 {formatPhoneNumber(client.phone)}
                               </span>
+                              {isRedListed && (
+                                <span className="text-[11px] font-extrabold bg-red-600 text-white px-2 py-0.5 rounded shadow-sm">
+                                  🚩 RED LIST • OWES {owedBarberLabel}
+                                </span>
+                              )}
+                              {(client.no_show_count || 0) > 0 && (
+                                <span className="text-[11px] font-bold bg-red-950/70 border border-red-500/50 text-red-300 px-2 py-0.5 rounded">
+                                  No-Shows: {client.no_show_count}
+                                </span>
+                              )}
                             </div>
 
                             {client.notes ? (
