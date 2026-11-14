@@ -42,20 +42,31 @@ export function minutesToTime(minutes: number): string {
 
 export function getDayOfWeekFromDateString(dateStr: string): number {
   if (!dateStr) return 0
-  const [y, m, d] = dateStr.split('-').map(Number)
-  return new Date(y, m - 1, d).getDay()
+  return new Date(dateStr.slice(0, 10) + 'T12:00:00Z').getUTCDay()
 }
 
-export function getBarberDaySchedule(workingHours: any, dayOfWeek: number): DaySchedule | null {
-  if (!workingHours) return null
-  const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
-  const dayName = dayNames[dayOfWeek]
-  const dayData = workingHours[dayOfWeek] ?? workingHours[String(dayOfWeek)] ?? workingHours[dayName] ?? workingHours[dayName.toUpperCase()]
+export function getBarberDaySchedule(
+  workingHours: any,
+  dayOfWeek: number
+): (DaySchedule & { break_start?: string | null; break_end?: string | null }) | null {
+  if (!workingHours || typeof workingHours !== 'object') return null
+  const titleDayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+  const dayName = titleDayNames[dayOfWeek]
+  if (!dayName) return null
+  const lowerDayName = dayName.toLowerCase()
+  const dayData =
+    workingHours[dayName] ??
+    workingHours[lowerDayName] ??
+    workingHours[dayName.toUpperCase()] ??
+    workingHours[dayOfWeek] ??
+    workingHours[String(dayOfWeek)]
   if (!dayData) return null
   return {
-    isWorking: dayData.isWorking ?? dayData.is_working ?? true,
-    start_time: (dayData.start_time ?? dayData.startTime ?? '09:00').slice(0, 5),
-    end_time: (dayData.end_time ?? dayData.endTime ?? '17:00').slice(0, 5),
+    isWorking: Boolean(dayData.isWorking ?? dayData.is_working ?? false),
+    start_time: (dayData.start_time ?? dayData.start ?? dayData.startTime ?? '09:00').slice(0, 5),
+    end_time: (dayData.end_time ?? dayData.end ?? dayData.endTime ?? '17:00').slice(0, 5),
+    break_start: dayData.break_start ?? dayData.breakStart ?? null,
+    break_end: dayData.break_end ?? dayData.breakEnd ?? null,
   }
 }
 
@@ -66,12 +77,20 @@ export async function getAvailableSlots(
 ): Promise<string[]> {
   const dayOfWeek = getDayOfWeekFromDateString(dateStr)
 
-  // 1. Fetch barber's working_hours JSONB
-  const { data: barberData } = await supabase
-    .from('barbers')
-    .select('working_hours')
-    .eq('id', barberId)
-    .maybeSingle()
+  // 1. Fetch barber's working_hours JSONB and weekly_schedules row in parallel
+  const [{ data: barberData }, { data: schedule }] = await Promise.all([
+    supabase
+      .from('barbers')
+      .select('working_hours')
+      .eq('id', barberId)
+      .maybeSingle(),
+    supabase
+      .from('weekly_schedules')
+      .select('*')
+      .eq('barber_id', barberId)
+      .eq('day_of_week', dayOfWeek)
+      .maybeSingle()
+  ])
 
   const daySchedule = getBarberDaySchedule(barberData?.working_hours, dayOfWeek)
 
@@ -82,25 +101,21 @@ export async function getAvailableSlots(
   let breakEnd: number | null = null
 
   if (daySchedule) {
+    // Primary source of truth: barbers.working_hours[dayName]
     isWorking = daySchedule.isWorking
     start = timeToMinutes(daySchedule.start_time)
     end = timeToMinutes(daySchedule.end_time)
-  } else {
-    // Fallback to legacy weekly_schedules table if working_hours JSONB is not yet populated
-    const { data: schedule } = await supabase
-      .from('weekly_schedules')
-      .select('*')
-      .eq('barber_id', barberId)
-      .eq('day_of_week', dayOfWeek)
-      .maybeSingle()
-
-    if (schedule) {
-      isWorking = true
-      start = timeToMinutes(schedule.start_time)
-      end = timeToMinutes(schedule.end_time)
-      breakStart = schedule.break_start ? timeToMinutes(schedule.break_start) : null
-      breakEnd = schedule.break_end ? timeToMinutes(schedule.break_end) : null
-    }
+    const bStartStr = daySchedule.break_start || schedule?.break_start || null
+    const bEndStr = daySchedule.break_end || schedule?.break_end || null
+    breakStart = bStartStr ? timeToMinutes(bStartStr) : null
+    breakEnd = bEndStr ? timeToMinutes(bEndStr) : null
+  } else if (schedule) {
+    // Fallback to weekly_schedules table only if working_hours JSONB is not populated
+    isWorking = true
+    start = timeToMinutes(schedule.start_time)
+    end = timeToMinutes(schedule.end_time)
+    breakStart = schedule.break_start ? timeToMinutes(schedule.break_start) : null
+    breakEnd = schedule.break_end ? timeToMinutes(schedule.break_end) : null
   }
 
   // 2. Check schedule overrides for specific date

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, UserX, Trash2, FileText, Clock, Ban, Search, Upload, Download, Flag, AlertTriangle, History, CheckCircle2, Sun, Moon, ExternalLink, Delete, Bell } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
-import { getAvailableSlots, getDayOfWeekFromDateString, getBarberDaySchedule, minutesToTime, DAYS_OF_WEEK, DEFAULT_WORKING_HOURS, type DaySchedule } from '../../lib/slotEngine'
+import { getAvailableSlots, getBarberDaySchedule, minutesToTime, DAYS_OF_WEEK, DEFAULT_WORKING_HOURS, type DaySchedule } from '../../lib/slotEngine'
 
 export interface Client {
   id: string
@@ -131,8 +131,8 @@ function generateMonthMatrix(year: number, month: number) {
 }
 
 // --- VAGARO-STYLE TIME-RAIL SETTINGS ---
-const CALENDAR_START_HOUR = 9
-const CALENDAR_END_HOUR = 20
+const CALENDAR_START_HOUR = 0
+const CALENDAR_END_HOUR = 24
 const PIXELS_PER_HOUR = 120 // Expanded scale: 120px/hr (30px per 15-min slot = exact 2px/min integer ratio)
 const PIXELS_PER_MINUTE = PIXELS_PER_HOUR / 60
 const TOTAL_HOURS = CALENDAR_END_HOUR - CALENDAR_START_HOUR
@@ -256,11 +256,14 @@ export default function AdminDashboard() {
   const isDragActiveRef = useRef(false)
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const justDraggedRef = useRef(false)
-  const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null)
+  const dayScrollContainerRef = useRef<HTMLDivElement | null>(null)
+  const weekScrollContainerRef = useRef<HTMLDivElement | null>(null)
 
   // --- MODALS STATE ---
   const [showBookModal, setShowBookModal] = useState(false)
   const [isBlockoutMode, setIsBlockoutMode] = useState(false)
+  const [isRepeatingBlockout, setIsRepeatingBlockout] = useState(false)
   const [blockEndTime, setBlockEndTime] = useState('')
   const [bookService, setBookService] = useState<any>(null)
   const [bookDate, setBookDate] = useState(selectedDate)
@@ -274,6 +277,8 @@ export default function AdminDashboard() {
   // Barber Working Hours (Settings) Modal State
   const [showBarberSettingsModal, setShowBarberSettingsModal] = useState(false)
   const [barberWorkingHours, setBarberWorkingHours] = useState<Record<number, DaySchedule>>(DEFAULT_WORKING_HOURS)
+  const [barberWeeklySchedules, setBarberWeeklySchedules] = useState<any[]>([])
+  const [dayViewOverride, setDayViewOverride] = useState<any | null>(null)
   const [loadingWorkingHours, setLoadingWorkingHours] = useState(false)
   const [isSavingWorkingHours, setIsSavingWorkingHours] = useState(false)
 
@@ -413,6 +418,116 @@ export default function AdminDashboard() {
       container.removeEventListener('touchmove', preventNativeScroll)
     }
   }, [viewMode, activeModule])
+
+  // Auto-scroll 24-hour calendar timeline to 8:00 AM (960px) on open / view change / barber change
+  useEffect(() => {
+    if (activeModule !== 'calendar') return
+    const targetScrollTop = 8 * PIXELS_PER_HOUR // 960px (8:00 AM at top of viewport)
+
+    const applyScroll = () => {
+      if (viewMode === 'day' && dayScrollContainerRef.current) {
+        dayScrollContainerRef.current.scrollTop = targetScrollTop
+      } else if (viewMode === 'week' && weekScrollContainerRef.current) {
+        weekScrollContainerRef.current.scrollTop = targetScrollTop
+      }
+    }
+
+    applyScroll()
+    const rafId = requestAnimationFrame(applyScroll)
+    return () => cancelAnimationFrame(rafId)
+  }, [activeModule, viewMode, selectedBarberId])
+
+  // Fetch weekly_schedules for selectedBarberId (with fallback to barbers.working_hours)
+  useEffect(() => {
+    if (!selectedBarberId) return
+    let isCancelled = false
+
+    const fetchWeeklyScheduleRows = async () => {
+      const { data } = await supabase
+        .from('weekly_schedules')
+        .select('day_of_week, start_time, end_time')
+        .eq('barber_id', selectedBarberId)
+
+      if (isCancelled) return
+
+      if (data && data.length > 0) {
+        setBarberWeeklySchedules(data)
+      } else {
+        // Fallback: synthesize from barber's working_hours JSONB or DEFAULT_WORKING_HOURS
+        const activeBarber = barbers.find(b => b.id === selectedBarberId)
+        const wh = activeBarber?.working_hours || DEFAULT_WORKING_HOURS
+        const fallbackRows = Object.entries(wh)
+          .filter(([, cfg]: [string, any]) => Boolean(cfg?.isWorking))
+          .map(([dayStr, cfg]: [string, any]) => ({
+            day_of_week: Number(dayStr),
+            start_time: cfg?.start_time || cfg?.start || '09:00',
+            end_time: cfg?.end_time || cfg?.end || '17:00',
+          }))
+        setBarberWeeklySchedules(fallbackRows)
+      }
+    }
+
+    fetchWeeklyScheduleRows()
+    return () => {
+      isCancelled = true
+    }
+  }, [selectedBarberId, refreshTrigger, barbers])
+
+  // Fetch dayViewOverride for selectedBarberId and selectedDate
+  useEffect(() => {
+    if (!selectedBarberId || !selectedDate) return
+    let isCancelled = false
+
+    const fetchDayOverride = async () => {
+      const { data } = await supabase
+        .from('schedule_overrides')
+        .select('*')
+        .eq('barber_id', selectedBarberId)
+        .eq('override_date', selectedDate)
+        .maybeSingle()
+
+      if (isCancelled) return
+      setDayViewOverride(data || null)
+      setIsDayOff(data?.is_off || false)
+      setOverrideStart(data?.custom_start_time?.slice(0, 5) || '09:00')
+      setOverrideEnd(data?.custom_end_time?.slice(0, 5) || '17:00')
+    }
+
+    fetchDayOverride()
+    return () => {
+      isCancelled = true
+    }
+  }, [selectedBarberId, selectedDate, refreshTrigger])
+
+  // Helper to check if a given YYYY-MM-DD date is a non-working day for the selected barber
+  const isNonWorkingDate = (dateStr: string, overridesList: any[]): boolean => {
+    // 1. Single Date Override (schedule_overrides)
+    const matchingOverride = overridesList?.find((o: any) => o && o.override_date === dateStr)
+    if (matchingOverride) {
+      return Boolean(matchingOverride.is_off)
+    }
+
+    const dayOfWeek = new Date(dateStr + 'T12:00:00Z').getUTCDay()
+    const dayName = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][dayOfWeek]
+
+    // 2. Barber working_hours JSONB (selectedBarber?.working_hours)
+    const selectedBarber = barbers.find(b => b.id === selectedBarberId)
+    if (selectedBarber?.working_hours) {
+      if (selectedBarber.working_hours[dayName] !== undefined && selectedBarber.working_hours[dayName] !== null) {
+        return !Boolean(selectedBarber.working_hours[dayName].isWorking)
+      }
+      const parsedDay = getBarberDaySchedule(selectedBarber.working_hours, dayOfWeek)
+      if (parsedDay) {
+        return !parsedDay.isWorking
+      }
+    }
+
+    // 3. Fallback (weekly_schedules)
+    const hasWorkingRow = barberWeeklySchedules.some(
+      (row: any) => Number(row.day_of_week) === dayOfWeek
+    )
+    return !hasWorkingRow
+  }
 
   useEffect(() => {
     async function fetchRoster() {
@@ -804,65 +919,28 @@ export default function AdminDashboard() {
         endTimeStr = `${Math.floor(proposedEndTime / 60).toString().padStart(2, '0')}:${(proposedEndTime % 60).toString().padStart(2, '0')}:00`
       }
 
-      // 1. Enforce Barber Working Hours Availability
-      const targetBarber = barbers.find(b => b.id === selectedBarberId)
-      let workingHours = targetBarber?.working_hours
-      if (!workingHours) {
-        const { data: bData } = await supabase.from('barbers').select('working_hours').eq('id', selectedBarberId).maybeSingle()
-        workingHours = bData?.working_hours
-      }
+      // Check conflicts on bookDate (for single bookings or non-repeating blockouts)
+      if (!isBlockoutMode || !isRepeatingBlockout) {
+        const { data: conflicts, error: conflictErr } = await supabase
+          .from('appointments')
+          .select('clients ( name ), start_time, end_time, is_blockout')
+          .eq('barber_id', selectedBarberId)
+          .eq('appointment_date', bookDate)
+          .neq('status', 'cancelled')
+        if (conflictErr) throw conflictErr
 
-      const dayOfWeek = getDayOfWeekFromDateString(bookDate)
-      const daySchedule = getBarberDaySchedule(workingHours, dayOfWeek)
-
-      // 2. Check schedule override for that specific date
-      const { data: overrideData } = await supabase
-        .from('schedule_overrides')
-        .select('*')
-        .eq('barber_id', selectedBarberId)
-        .eq('override_date', bookDate)
-        .maybeSingle()
-
-      if (overrideData?.is_off) {
-        alert(`Cannot ${isBlockoutMode ? 'block time' : 'book'}: Barber is marked OFF on this date.`)
-        return
-      }
-
-      const shiftStart = overrideData?.start_time ? toMinutes(overrideData.start_time) : daySchedule ? toMinutes(daySchedule.start_time) : null
-      const shiftEnd = overrideData?.end_time ? toMinutes(overrideData.end_time) : daySchedule ? toMinutes(daySchedule.end_time) : null
-      const isShiftWorking = overrideData ? !overrideData.is_off : daySchedule ? daySchedule.isWorking : true
-
-      if (!isShiftWorking) {
-        alert(`Cannot ${isBlockoutMode ? 'block time' : 'book'}: Barber is not scheduled to work on ${DAYS_OF_WEEK[dayOfWeek].name}s.`)
-        return
-      }
-
-      if (shiftStart !== null && shiftEnd !== null) {
-        if (proposedStartTime < shiftStart || proposedEndTime > shiftEnd) {
-          alert(`Cannot ${isBlockoutMode ? 'block time' : 'book'}: Proposed slot (${formatTime(bookTime)} - ${formatTime(endTimeStr)}) falls outside barber's working hours (${minutesToTime(shiftStart)} - ${minutesToTime(shiftEnd)}).`)
-          return
-        }
-      }
-
-      const { data: conflicts, error: conflictErr } = await supabase
-        .from('appointments')
-        .select('clients ( name ), start_time, end_time, is_blockout')
-        .eq('barber_id', selectedBarberId)
-        .eq('appointment_date', bookDate)
-        .neq('status', 'cancelled')
-      if (conflictErr) throw conflictErr
-
-      if (conflicts) {
-        // Universal Overlap Formula: (proposedStartTime < existingAppt.end_time) && (proposedEndTime > existingAppt.start_time)
-        const conflict = conflicts.find((c: any) => {
-          const cStart = toMinutes(c.start_time)
-          const cEnd = toMinutes(c.end_time)
-          return (proposedStartTime < cEnd) && (proposedEndTime > cStart)
-        })
-        if (conflict) {
-          const conflictName = (conflict as any).is_blockout ? 'Blocked Time' : (conflict as any).clients?.name || 'Walk-In'
-          alert(`Not enough time! Slot overlaps with existing booking (${conflictName} at ${formatTime(conflict.start_time)}).`)
-          return
+        if (conflicts) {
+          // Universal Overlap Formula: (proposedStartTime < existingAppt.end_time) && (proposedEndTime > existingAppt.start_time)
+          const conflict = conflicts.find((c: any) => {
+            const cStart = toMinutes(c.start_time)
+            const cEnd = toMinutes(c.end_time)
+            return (proposedStartTime < cEnd) && (proposedEndTime > cStart)
+          })
+          if (conflict) {
+            const conflictName = (conflict as any).is_blockout ? 'Blocked Time' : (conflict as any).clients?.name || 'Walk-In'
+            alert(`Not enough time! Slot overlaps with existing booking (${conflictName} at ${formatTime(conflict.start_time)}).`)
+            return
+          }
         }
       }
 
@@ -914,25 +992,97 @@ export default function AdminDashboard() {
       }
 
       // --- STEP B: Insert into appointments with is_blockout ---
-      const insertPayload: any = {
-        barber_id: selectedBarberId,
-        client_id: clientId,
-        appointment_date: bookDate,
-        start_time: `${bookTime.slice(0, 5)}:00`,
-        end_time: endTimeStr,
-        status: isBlockoutMode ? 'blocked' : 'booked',
-        notes: bookNotes.trim() || (isBlockoutMode ? 'Blocked Time' : null),
-        is_blockout: isBlockoutMode,
-        barber_seen_at: new Date().toISOString()
-      }
-      if (!isBlockoutMode && bookService?.id) {
-        insertPayload.service_id = bookService.id
-      } else if (bookService?.id) {
-        insertPayload.service_id = bookService.id
-      }
+      const nowIso = new Date().toISOString()
+      const startTimeFormatted = `${bookTime.slice(0, 5)}:00`
 
-      const { error: apptErr } = await supabase.from('appointments').insert(insertPayload)
-      if (apptErr) throw apptErr
+      if (isBlockoutMode && isRepeatingBlockout) {
+        const startDt = new Date(bookDate + 'T12:00:00Z')
+        const endDt = new Date(startDt.getTime() + 56 * 24 * 60 * 60 * 1000)
+        const endDateStr = endDt.toISOString().split('T')[0]
+
+        const [ovRes, existingBlocksRes] = await Promise.all([
+          supabase
+            .from('schedule_overrides')
+            .select('override_date, is_off')
+            .eq('barber_id', selectedBarberId)
+            .gte('override_date', bookDate)
+            .lte('override_date', endDateStr),
+          supabase
+            .from('appointments')
+            .select('appointment_date, start_time')
+            .eq('barber_id', selectedBarberId)
+            .eq('is_blockout', true)
+            .neq('status', 'cancelled')
+            .gte('appointment_date', bookDate)
+            .lte('appointment_date', endDateStr)
+        ])
+
+        const rangeOverrides = ovRes.data || []
+        const existingBlocks = existingBlocksRes.data || []
+        const rowsToInsert: any[] = []
+
+        for (let d = 0; d <= 56; d++) {
+          const curDt = new Date(startDt.getTime() + d * 24 * 60 * 60 * 1000)
+          const curDateStr = curDt.toISOString().split('T')[0]
+
+          const isWorkingDay = !isNonWorkingDate(curDateStr, rangeOverrides)
+
+          // Include bookDate itself plus every working day in the 8-week window
+          if (curDateStr !== bookDate && !isWorkingDay) continue
+
+          // Skip if a blockout already exists at the exact same date & start_time
+          const alreadyBlocked = existingBlocks.some(
+            (b: any) => b.appointment_date === curDateStr && b.start_time?.slice(0, 5) === bookTime.slice(0, 5)
+          )
+          if (alreadyBlocked) continue
+
+          const rowPayload: any = {
+            barber_id: selectedBarberId,
+            client_id: clientId,
+            appointment_date: curDateStr,
+            start_time: startTimeFormatted,
+            end_time: endTimeStr,
+            status: 'blocked',
+            notes: bookNotes.trim() || 'Blocked Time',
+            is_blockout: true,
+            barber_seen_at: nowIso
+          }
+          if (bookService?.id) {
+            rowPayload.service_id = bookService.id
+          }
+          rowsToInsert.push(rowPayload)
+        }
+
+        if (rowsToInsert.length > 0) {
+          const { error: batchErr } = await supabase.from('appointments').insert(rowsToInsert)
+          if (batchErr) throw batchErr
+        }
+
+        setStatusBanner({
+          type: 'success',
+          message: `Blocked time across ${rowsToInsert.length} working day${rowsToInsert.length === 1 ? '' : 's'} (next 8 weeks).`
+        })
+      } else {
+        const insertPayload: any = {
+          barber_id: selectedBarberId,
+          client_id: clientId,
+          appointment_date: bookDate,
+          start_time: startTimeFormatted,
+          end_time: endTimeStr,
+          status: isBlockoutMode ? 'blocked' : 'booked',
+          notes: bookNotes.trim() || (isBlockoutMode ? 'Blocked Time' : null),
+          is_blockout: isBlockoutMode,
+          barber_seen_at: nowIso
+        }
+        if (!isBlockoutMode && bookService?.id) {
+          insertPayload.service_id = bookService.id
+        } else if (bookService?.id) {
+          insertPayload.service_id = bookService.id
+        }
+
+        const { error: apptErr } = await supabase.from('appointments').insert(insertPayload)
+        if (apptErr) throw apptErr
+      }
 
       // Dispatch Twilio SMS Notifications (only for real client bookings)
       if (!isBlockoutMode) {
@@ -966,6 +1116,7 @@ export default function AdminDashboard() {
 
       setShowBookModal(false)
       setIsBlockoutMode(false)
+      setIsRepeatingBlockout(false)
       setBookService(null)
       setBookTime('')
       setBlockEndTime('')
@@ -1016,47 +1167,7 @@ export default function AdminDashboard() {
     setIsRescheduling(true)
 
     try {
-      // 1. Enforce Barber Working Hours Availability
-      const targetBarber = barbers.find(b => b.id === targetBarberId)
-      let workingHours = targetBarber?.working_hours
-      if (!workingHours) {
-        const { data: bData } = await supabase.from('barbers').select('working_hours').eq('id', targetBarberId).maybeSingle()
-        workingHours = bData?.working_hours
-      }
-
-      const dayOfWeek = getDayOfWeekFromDateString(newDate)
-      const daySchedule = getBarberDaySchedule(workingHours, dayOfWeek)
-
-      // 2. Check schedule override for that specific date
-      const { data: overrideData } = await supabase
-        .from('schedule_overrides')
-        .select('*')
-        .eq('barber_id', targetBarberId)
-        .eq('override_date', newDate)
-        .maybeSingle()
-
-      if (overrideData?.is_off) {
-        alert("Cannot reschedule: Barber is marked OFF on this date.")
-        return
-      }
-
-      const shiftStart = overrideData?.start_time ? toMinutes(overrideData.start_time) : daySchedule ? toMinutes(daySchedule.start_time) : null
-      const shiftEnd = overrideData?.end_time ? toMinutes(overrideData.end_time) : daySchedule ? toMinutes(daySchedule.end_time) : null
-      const isShiftWorking = overrideData ? !overrideData.is_off : daySchedule ? daySchedule.isWorking : true
-
-      if (!isShiftWorking) {
-        alert(`Cannot reschedule: Barber is not scheduled to work on ${DAYS_OF_WEEK[dayOfWeek].name}s.`)
-        return
-      }
-
-      if (shiftStart !== null && shiftEnd !== null) {
-        if (newStartMins < shiftStart || newEndMins > shiftEnd) {
-          alert(`Cannot reschedule: Slot (${formatTime(newStartTime)} - ${formatTime(newEndTimeStr)}) falls outside barber's working hours (${minutesToTime(shiftStart)} - ${minutesToTime(shiftEnd)}).`)
-          return
-        }
-      }
-
-      // 3. Run strict universal collision math against existing appointments (STRICTLY EXCLUDE THE DRAGGED APPOINTMENT ITSELF)
+      // Run strict universal collision math against existing appointments (STRICTLY EXCLUDE THE DRAGGED APPOINTMENT ITSELF)
       const { data: conflicts, error: conflictErr } = await supabase
         .from('appointments')
         .select('id, clients ( name ), start_time, end_time')
@@ -1106,14 +1217,53 @@ export default function AdminDashboard() {
     if (!selectedBarberId) return
     setIsSavingWorkingHours(true)
     try {
+      // Build unified working_hours payload supporting both day-name keys ("Sunday".."Saturday") and numeric indices (0..6)
+      const workingHoursPayload: Record<string, any> = {}
+      DAYS_OF_WEEK.forEach(day => {
+        const cfg = barberWorkingHours[day.index] || DEFAULT_WORKING_HOURS[day.index]
+        const startVal = (cfg?.start_time || (cfg as any)?.start || '09:00').slice(0, 5)
+        const endVal = (cfg?.end_time || (cfg as any)?.end || '17:00').slice(0, 5)
+        const dayEntry = {
+          isWorking: Boolean(cfg?.isWorking),
+          start: startVal,
+          end: endVal,
+          start_time: startVal,
+          end_time: endVal,
+        }
+        workingHoursPayload[day.name] = dayEntry
+        workingHoursPayload[day.index] = dayEntry
+      })
+
       const { error } = await supabase
         .from('barbers')
-        .update({ working_hours: barberWorkingHours })
+        .update({ working_hours: workingHoursPayload })
         .eq('id', selectedBarberId)
 
       if (error) throw error
+
+      // Also keep weekly_schedules table synced with barberWorkingHours
+      const workingRows = DAYS_OF_WEEK
+        .filter(day => Boolean((barberWorkingHours[day.index] || DEFAULT_WORKING_HOURS[day.index])?.isWorking))
+        .map(day => {
+          const cfg = barberWorkingHours[day.index] || DEFAULT_WORKING_HOURS[day.index]
+          const startVal = (cfg?.start_time || (cfg as any)?.start || '09:00').slice(0, 5)
+          const endVal = (cfg?.end_time || (cfg as any)?.end || '17:00').slice(0, 5)
+          return {
+            barber_id: selectedBarberId,
+            day_of_week: day.index,
+            start_time: `${startVal}:00`,
+            end_time: `${endVal}:00`
+          }
+        })
+
+      await supabase.from('weekly_schedules').delete().eq('barber_id', selectedBarberId)
+      if (workingRows.length > 0) {
+        await supabase.from('weekly_schedules').upsert(workingRows, { onConflict: 'barber_id,day_of_week' })
+      }
+
       alert("Barber schedule updated successfully!")
-      setBarbers(prev => prev.map(b => b.id === selectedBarberId ? { ...b, working_hours: barberWorkingHours } : b))
+      setBarbers(prev => prev.map(b => b.id === selectedBarberId ? { ...b, working_hours: workingHoursPayload } : b))
+      setBarberWeeklySchedules(workingRows)
       setShowBarberSettingsModal(false)
       setRefreshTrigger(prev => prev + 1)
     } catch (err: any) {
@@ -2077,7 +2227,8 @@ export default function AdminDashboard() {
       <div className="relative w-full h-full">
         {Array.from({ length: TOTAL_HOURS + 1 }).map((_, hourIdx) => {
           const hour = CALENDAR_START_HOUR + hourIdx
-          const hDisplay = hour > 12 ? `${hour - 12} PM` : hour === 12 ? '12 PM' : `${hour} AM`
+          const normalizedHour = hour % 24
+          const hDisplay = normalizedHour === 0 ? '12 AM' : normalizedHour === 12 ? '12 PM' : normalizedHour > 12 ? `${normalizedHour - 12} PM` : `${normalizedHour} AM`
           const isNotLast = hourIdx < TOTAL_HOURS
 
           return (
@@ -2408,13 +2559,17 @@ export default function AdminDashboard() {
           backgroundRepeat: 'repeat-y',
         }}
       >
-        {/* Off-duty overlay */}
+        {/* Subtle non-working day shaded diagonal-stripe backdrop (slots remain clickable for extra shifts) */}
         {isOff && (
-          <div className="absolute inset-0 bg-[repeating-linear-gradient(45deg,transparent,transparent_10px,var(--color-brand-900)_10px,var(--color-brand-900)_20px)] opacity-60 z-10 pointer-events-none flex items-center justify-center">
-            <div className="bg-[var(--color-brand-900)]/90 border border-red-500/40 text-red-500 text-xs font-bold px-3 py-1.5 rounded-full shadow-lg">
-              OFF DUTY
-            </div>
-          </div>
+          <div
+            className="absolute inset-0 z-[5] pointer-events-none"
+            style={{
+              backgroundColor: isLight ? 'rgba(23, 15, 46, 0.07)' : 'rgba(4, 2, 8, 0.48)',
+              backgroundImage: isLight
+                ? 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(23, 15, 46, 0.06) 10px, rgba(23, 15, 46, 0.06) 20px)'
+                : 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(4, 2, 8, 0.42) 10px, rgba(4, 2, 8, 0.42) 20px)'
+            }}
+          />
         )}
 
         {/* Empty Tap-to-Book Slots (borderless - zero physical height stacking) */}
@@ -2434,14 +2589,13 @@ export default function AdminDashboard() {
                 setBookDate(gridDate)
                 setBookTime(timeStr)
                 setBlockEndTime(minutesToTime(toMinutes(timeStr) + 60))
+                setIsRepeatingBlockout(false)
                 if (!bookService && adminServices.length > 0) setBookService(adminServices[0])
                 setShowBookModal(true)
               }}
               title={isSlotHovered ? `Drop to reschedule to ${formatTime(timeStr)}` : `Book ${formatTime(timeStr)}`}
               className={`absolute left-0 w-full m-0 p-0 border-0 outline-none transition-colors z-10 ${
-                isOff
-                  ? 'pointer-events-none opacity-0'
-                  : isSlotHovered
+                isSlotHovered
                   ? 'bg-[var(--color-brand-accent)]/35 ring-1 ring-inset ring-[var(--color-brand-accent)]'
                   : 'cursor-pointer hover:bg-[var(--color-brand-accent)]/15 active:bg-[var(--color-brand-accent)]/25'
               }`}
@@ -2460,7 +2614,7 @@ export default function AdminDashboard() {
         })}
 
         {/* Live Current Time Red Indicator Line */}
-        {isToday && isWithinHours && !isOff && (
+        {isToday && isWithinHours && (
           <div
             className="absolute left-0 right-0 z-20 pointer-events-none flex items-center overflow-hidden"
             style={{ top: `${currentTop}px` }}
@@ -2471,7 +2625,7 @@ export default function AdminDashboard() {
         )}
 
         {/* Dynamic Appointment Blocks */}
-        {!isOff && gridAppts.map(appt => {
+        {gridAppts.map(appt => {
           const top = timeToPixels(appt.start_time)
           const durationMins = Math.max(15, toMinutes(appt.end_time) - toMinutes(appt.start_time))
           const height = durationMins * PIXELS_PER_MINUTE
@@ -2840,6 +2994,7 @@ export default function AdminDashboard() {
                   onClick={() => {
                     setShowBookModal(false)
                     setIsBlockoutMode(false)
+                    setIsRepeatingBlockout(false)
                     setBookTime('')
                     setBlockEndTime('')
                     setBookNotes('')
@@ -2996,7 +3151,7 @@ export default function AdminDashboard() {
                    </>
                  ) : (
                    <>
-                     {/* BLOCKOUT MODE: ONLY START TIME, END TIME, AND NOTES */}
+                     {/* BLOCKOUT MODE: START TIME, END TIME, REPEATING SWITCH, AND NOTES */}
                      <div className="grid grid-cols-2 gap-4">
                        <div>
                          <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">Start Time</label>
@@ -3018,6 +3173,30 @@ export default function AdminDashboard() {
                            className={`w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none ${isLight ? '[color-scheme:light]' : '[color-scheme:dark]'} cursor-pointer text-[var(--color-brand-light)]`}
                          />
                        </div>
+                     </div>
+
+                     <div className="flex items-center justify-between gap-3 p-3.5 rounded-xl bg-[var(--color-brand-900)]/80 border border-[var(--color-brand-700)]">
+                       <div className="min-w-0">
+                         <div className="text-sm font-bold text-[var(--color-brand-light)]">Repeating</div>
+                         <div className="text-xs text-[var(--color-brand-muted)] leading-snug mt-0.5">
+                           Auto-block this exact time window across all working days (next 8 weeks).
+                         </div>
+                       </div>
+                       <button
+                         type="button"
+                         role="switch"
+                         aria-checked={isRepeatingBlockout}
+                         onClick={() => setIsRepeatingBlockout(prev => !prev)}
+                         className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                           isRepeatingBlockout ? 'bg-[var(--color-brand-accent)]' : 'bg-[var(--color-brand-700)]'
+                         }`}
+                       >
+                         <span
+                           className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                             isRepeatingBlockout ? 'translate-x-5' : 'translate-x-0'
+                           }`}
+                         />
+                       </button>
                      </div>
 
                      <div className="space-y-1.5 pt-2">
@@ -3908,6 +4087,7 @@ export default function AdminDashboard() {
                 onClick={() => {
                   setBookDate(selectedDate)
                   setBookTime('')
+                  setIsRepeatingBlockout(false)
                   if (!bookService && adminServices.length > 0) setBookService(adminServices[0])
                   setShowBookModal(true)
                 }}
@@ -3938,7 +4118,7 @@ export default function AdminDashboard() {
                 <ChevronRight className="w-4 h-4" />
               </button>
 
-              <div className="relative flex items-center cursor-pointer group ml-1.5">
+              <div className="relative flex items-center cursor-pointer group ml-1.5 min-w-0">
                 <span className="text-xs sm:text-sm font-bold text-[var(--color-brand-light)] group-hover:text-[var(--color-brand-periwinkle)] transition-colors truncate">
                   {viewMode === 'month' && `${monthNames[viewMonthDate.getMonth()]} ${viewMonthDate.getFullYear()}`}
                   {viewMode === 'week' && `${monthNames[viewWeekStartDate.getMonth()].slice(0,3)} ${viewWeekStartDate.getDate()} – ${isSameMonth ? '' : monthNames[weekEndDate.getMonth()].slice(0,3) + ' '}${weekEndDate.getDate()}, ${viewWeekStartDate.getFullYear()}`}
@@ -3955,6 +4135,17 @@ export default function AdminDashboard() {
                   className={`opacity-0 absolute inset-0 w-full h-full cursor-pointer ${isLight ? '[color-scheme:light]' : '[color-scheme:dark]'}`}
                 />
               </div>
+              {viewMode === 'day' && isNonWorkingDate(selectedDate, dayViewOverride ? [dayViewOverride] : []) && (
+                <span
+                  className={`ml-1.5 px-2 py-0.5 rounded-full text-[10px] sm:text-xs font-bold border flex-shrink-0 ${
+                    isLight
+                      ? 'text-[#991B1B] bg-[#E6CCD2] border-[#B91C1C]/40'
+                      : 'text-red-300 bg-red-950/70 border-red-800/70'
+                  }`}
+                >
+                  Scheduled Day Off
+                </span>
+              )}
             </div>
 
             {/* Segmented View Mode Toggle (Vivid Periwinkle) */}
@@ -4012,28 +4203,37 @@ export default function AdminDashboard() {
         {/* CALENDAR MAIN BODY (w-full flex-1 edge-to-edge) */}
         <main className="w-full flex-1 overflow-hidden flex flex-col relative">
           {/* DAY VIEW */}
-          {viewMode === 'day' && (
-            <div ref={scrollContainerRef} className="flex-1 w-full overflow-y-auto overflow-x-hidden relative flex flex-col">
-              {isDayOff && (
-                <div className={`border-b px-4 py-1.5 text-xs font-semibold flex items-center justify-between z-30 flex-shrink-0 ${
-                  isLight ? 'bg-[#E6CCD2] border-[#B91C1C]/40 text-[#7F1D1D]' : 'bg-red-950/80 border-red-800 text-red-200'
-                }`}>
-                  <span>Barber is marked OFF for this day. Tap Manage to adjust schedule.</span>
-                  <button onClick={() => setShowManageDayModal(true)} className="underline cursor-pointer font-bold ml-2">Edit</button>
-                </div>
-              )}
-              <div className="flex flex-1 min-w-full">
-                {renderYAxis()}
-                {loadingAppts ? (
-                  <div className="flex-1 p-8 text-[var(--color-brand-muted)] flex items-center justify-center animate-pulse">
-                    Loading lineup...
+          {viewMode === 'day' && (() => {
+            const isDayNonWorking = isNonWorkingDate(selectedDate, dayViewOverride ? [dayViewOverride] : [])
+            return (
+              <div
+                ref={(el) => {
+                  dayScrollContainerRef.current = el
+                  scrollContainerRef.current = el
+                }}
+                className="flex-1 w-full overflow-y-auto overflow-x-hidden relative flex flex-col"
+              >
+                {isDayNonWorking && (
+                  <div className={`border-b px-4 py-1.5 text-xs font-semibold flex items-center justify-between z-30 flex-shrink-0 ${
+                    isLight ? 'bg-[#E6CCD2] border-[#B91C1C]/40 text-[#7F1D1D]' : 'bg-red-950/80 border-red-800 text-red-200'
+                  }`}>
+                    <span>Scheduled Day Off — empty slots remain open if you pick up an extra shift.</span>
+                    <button onClick={() => setShowManageDayModal(true)} className="underline cursor-pointer font-bold ml-2">Manage Day</button>
                   </div>
-                ) : (
-                  renderTimeGrid(selectedDate, appointments, isDayOff, false)
                 )}
+                <div className="flex flex-1 min-w-full">
+                  {renderYAxis()}
+                  {loadingAppts ? (
+                    <div className="flex-1 p-8 text-[var(--color-brand-muted)] flex items-center justify-center animate-pulse">
+                      Loading lineup...
+                    </div>
+                  ) : (
+                    renderTimeGrid(selectedDate, appointments, isDayNonWorking, false)
+                  )}
+                </div>
               </div>
-            </div>
-          )}
+            )
+          })()}
 
           {/* WEEK VIEW */}
           {viewMode === 'week' && (
@@ -4048,19 +4248,39 @@ export default function AdminDashboard() {
                     const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
                     const isToday = dateStr === todayStr
                     const isSelected = dateStr === selectedDate
+                    const isOff = isNonWorkingDate(dateStr, weekOverrides)
                     return (
                       <button
                         key={dateStr}
                         onClick={() => handleDayClick(dateStr)}
                         title={`Zoom into ${dateStr}`}
-                        className={`px-0.5 py-1.5 sm:p-2 text-center border-r border-[var(--color-brand-700)]/60 hover:bg-[var(--color-brand-accent)]/15 transition-colors cursor-pointer group min-w-0 overflow-hidden ${
+                        style={
+                          isOff
+                            ? {
+                                backgroundColor: isLight ? 'rgba(23, 15, 46, 0.08)' : 'rgba(4, 2, 8, 0.5)',
+                                backgroundImage: isLight
+                                  ? 'repeating-linear-gradient(45deg, transparent, transparent 8px, rgba(23, 15, 46, 0.05) 8px, rgba(23, 15, 46, 0.05) 16px)'
+                                  : 'repeating-linear-gradient(45deg, transparent, transparent 8px, rgba(4, 2, 8, 0.35) 8px, rgba(4, 2, 8, 0.35) 16px)'
+                              }
+                            : undefined
+                        }
+                        className={`px-0.5 py-1.5 sm:p-2 text-center border-r border-[var(--color-brand-700)]/60 hover:bg-[var(--color-brand-accent)]/15 transition-colors cursor-pointer group min-w-0 overflow-hidden relative ${
                           isToday ? 'bg-[var(--color-brand-accent)]/10' : ''
-                        }`}
+                        } ${isOff ? 'opacity-75' : ''}`}
                       >
-                        <div className={`text-[9px] sm:text-[10px] uppercase font-bold tracking-tight truncate ${
-                          isToday ? 'text-[var(--color-brand-accent)]' : 'text-[var(--color-brand-muted)] group-hover:text-[var(--color-brand-light)]'
-                        }`}>
-                          {dayNamesShort[d.getDay()]}
+                        <div className="flex items-center justify-center gap-1 min-w-0">
+                          <span className={`text-[9px] sm:text-[10px] uppercase font-bold tracking-tight truncate ${
+                            isToday ? 'text-[var(--color-brand-accent)]' : 'text-[var(--color-brand-muted)] group-hover:text-[var(--color-brand-light)]'
+                          }`}>
+                            {dayNamesShort[d.getDay()]}
+                          </span>
+                          {isOff && (
+                            <span className={`text-[8px] font-bold px-1 rounded border leading-tight ${
+                              isLight ? 'text-[#991B1B] bg-[#E6CCD2] border-[#B91C1C]/40' : 'text-red-400 bg-red-950/70 border-red-800/60'
+                            }`}>
+                              OFF
+                            </span>
+                          )}
                         </div>
                         <div className={`text-xs sm:text-base font-bold truncate ${
                           isToday ? 'text-[var(--color-brand-accent)]' : isSelected ? 'text-[var(--color-brand-light)] underline' : 'text-[var(--color-brand-light)]'
@@ -4074,7 +4294,13 @@ export default function AdminDashboard() {
               </div>
 
               {/* Scrollable Week Grid */}
-              <div ref={scrollContainerRef} className="flex-1 w-full overflow-y-auto overflow-x-hidden relative flex">
+              <div
+                ref={(el) => {
+                  weekScrollContainerRef.current = el
+                  scrollContainerRef.current = el
+                }}
+                className="flex-1 w-full overflow-y-auto overflow-x-hidden relative flex"
+              >
                 <div className="flex w-full flex-1 min-w-0">
                   {renderYAxis()}
                   <div className="grid grid-cols-7 flex-1 w-full min-w-0">
@@ -4083,7 +4309,7 @@ export default function AdminDashboard() {
                       d.setDate(d.getDate() + i)
                       const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
                       const dayAppts = weekAppointments.filter(a => a.appointment_date === dateStr)
-                      const isOff = weekOverrides.find(o => o.override_date === dateStr)?.is_off
+                      const isOff = isNonWorkingDate(dateStr, weekOverrides)
                       return (
                         <div key={dateStr} className="relative min-w-0 w-full">
                           {renderTimeGrid(dateStr, dayAppts, isOff, true)}
@@ -4118,16 +4344,25 @@ export default function AdminDashboard() {
                   const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
                   const isToday = dateStr === todayStr
                   const dayAppts = monthAppointments.filter(a => a.appointment_date === dateStr)
-                  const dayOverride = monthOverrides.find(o => o.override_date === dateStr)
-                  const isOff = dayOverride?.is_off
+                  const isOff = isNonWorkingDate(dateStr, monthOverrides)
 
                   return (
                     <button
                       key={dateStr}
                       onClick={() => handleDayClick(dateStr)}
+                      style={
+                        isOff
+                          ? {
+                              backgroundColor: isLight ? 'rgba(23, 15, 46, 0.08)' : 'rgba(4, 2, 8, 0.65)',
+                              backgroundImage: isLight
+                                ? 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(23, 15, 46, 0.05) 10px, rgba(23, 15, 46, 0.05) 20px)'
+                                : 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(35, 18, 66, 0.35) 10px, rgba(35, 18, 66, 0.35) 20px)'
+                            }
+                          : undefined
+                      }
                       className={`bg-[var(--color-brand-900)] hover:bg-[var(--color-brand-800)]/70 transition-colors p-1.5 sm:p-2 min-h-[90px] sm:min-h-[110px] flex flex-col items-start text-left relative group cursor-pointer overflow-hidden ${
                         isToday ? 'ring-1 ring-inset ring-[var(--color-brand-accent)]' : ''
-                      } ${isOff ? 'opacity-60' : ''}`}
+                      } ${isOff ? 'opacity-70' : ''}`}
                     >
                       {/* Date Header */}
                       <div className="w-full flex items-center justify-between">
@@ -4153,7 +4388,7 @@ export default function AdminDashboard() {
                       </div>
 
                       {/* Appointment Chips inside Day Square */}
-                      {!isOff && dayAppts.length > 0 && (
+                      {dayAppts.length > 0 && (
                         <div className="w-full space-y-1 overflow-hidden mt-1 flex-1">
                           {dayAppts.slice(0, 3).map(appt => {
                             const isBlockout = Boolean(appt.is_blockout)
