@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
-import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, UserX, Trash2, FileText, Clock, Ban, Search, Upload, Download, Flag, AlertTriangle, History, CheckCircle2, Sun, Moon, ExternalLink, Delete } from 'lucide-react'
+import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, UserX, Trash2, FileText, Clock, Ban, Search, Upload, Download, Flag, AlertTriangle, History, CheckCircle2, Sun, Moon, ExternalLink, Delete, Bell } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { getAvailableSlots, getDayOfWeekFromDateString, getBarberDaySchedule, minutesToTime, DAYS_OF_WEEK, DEFAULT_WORKING_HOURS, type DaySchedule } from '../../lib/slotEngine'
 
@@ -133,11 +133,11 @@ function generateMonthMatrix(year: number, month: number) {
 // --- VAGARO-STYLE TIME-RAIL SETTINGS ---
 const CALENDAR_START_HOUR = 9
 const CALENDAR_END_HOUR = 20
-const PIXELS_PER_HOUR = 80 // Condensed Vagaro scale: 80px/hr (20px per 15-min slot)
+const PIXELS_PER_HOUR = 120 // Expanded scale: 120px/hr (30px per 15-min slot = exact 2px/min integer ratio)
 const PIXELS_PER_MINUTE = PIXELS_PER_HOUR / 60
 const TOTAL_HOURS = CALENDAR_END_HOUR - CALENDAR_START_HOUR
 const TOTAL_RAIL_HEIGHT = TOTAL_HOURS * PIXELS_PER_HOUR
-const SLOT_HEIGHT = PIXELS_PER_HOUR / 4 // 20px
+const SLOT_HEIGHT = PIXELS_PER_HOUR / 4 // 30px
 
 // Parses "HH:MM" or "HH:MM:SS" strictly — no padding, no rounding, no offsets.
 function parseTimeParts(timeStr: string): [number, number] {
@@ -321,6 +321,12 @@ export default function AdminDashboard() {
   const [csvImportResult, setCsvImportResult] = useState<string | null>(null)
   const [statusBanner, setStatusBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
 
+  // Per-Barber New Booking Alert Center State
+  const [unseenBookings, setUnseenBookings] = useState<any[]>([])
+  const [showAlertsModal, setShowAlertsModal] = useState(false)
+  const [acknowledgingId, setAcknowledgingId] = useState<string | null>(null)
+  const [clearingAllAlerts, setClearingAllAlerts] = useState(false)
+
   // Manual Add Client Modal State
   const [showAddClientModal, setShowAddClientModal] = useState(false)
   const [newClientName, setNewClientName] = useState('')
@@ -468,13 +474,40 @@ export default function AdminDashboard() {
   }, [showBarberSettingsModal, selectedBarberId])
 
   // --- DATA FETCHERS ---
+  const fetchUnseenBookings = async () => {
+    if (!session) return
+    const { data, error } = await supabase
+      .from('appointments')
+      .select('id, barber_id, appointment_date, start_time, end_time, notes, created_at, is_blockout, status, clients ( id, name, phone ), services ( id, name, duration_minutes, price )')
+      .is('barber_seen_at', null)
+      .eq('is_blockout', false)
+      .neq('status', 'cancelled')
+      .neq('status', 'blocked')
+      .order('created_at', { ascending: false })
+    if (!error && data) {
+      setUnseenBookings(data)
+    }
+  }
+
+  useEffect(() => {
+    if (!session) {
+      setUnseenBookings([])
+      return
+    }
+    fetchUnseenBookings()
+    const interval = window.setInterval(() => {
+      fetchUnseenBookings()
+    }, 30_000)
+    return () => window.clearInterval(interval)
+  }, [session, refreshTrigger])
+
   useEffect(() => {
     async function fetchLineup() {
       if (!selectedBarberId || activeModule !== 'calendar' || viewMode !== 'day') return
       setLoadingAppts(true)
       const [apptRes, overrideRes] = await Promise.all([
         supabase.from('appointments')
-          .select(`id, barber_id, client_id, appointment_date, start_time, end_time, status, notes, is_blockout, clients ( id, name, phone, notes, is_red_listed, red_listed_by, red_listed_reason, no_show_count )`)
+          .select(`id, barber_id, client_id, service_id, appointment_date, start_time, end_time, status, notes, is_blockout, clients ( id, name, phone, notes, is_red_listed, red_listed_by, red_listed_reason, no_show_count ), services ( id, name, duration_minutes, price )`)
           .eq('appointment_date', selectedDate)
           .eq('barber_id', selectedBarberId)
           .neq('status', 'cancelled')
@@ -510,7 +543,7 @@ export default function AdminDashboard() {
 
       const [apptRes, overrideRes] = await Promise.all([
         supabase.from('appointments')
-          .select('id, barber_id, client_id, appointment_date, start_time, end_time, status, is_blockout, notes, clients ( id, name, phone, notes, is_red_listed, red_listed_by, red_listed_reason, no_show_count )')
+          .select('id, barber_id, client_id, service_id, appointment_date, start_time, end_time, status, is_blockout, notes, clients ( id, name, phone, notes, is_red_listed, red_listed_by, red_listed_reason, no_show_count ), services ( id, name, duration_minutes, price )')
           .eq('barber_id', selectedBarberId)
           .gte('appointment_date', startOfMonth)
           .lte('appointment_date', endOfMonth)
@@ -537,7 +570,7 @@ export default function AdminDashboard() {
       const endOfWeek = `${endOfWeekDate.getFullYear()}-${String(endOfWeekDate.getMonth() + 1).padStart(2, '0')}-${String(endOfWeekDate.getDate()).padStart(2, '0')}`
 
       const [apptRes, overrideRes] = await Promise.all([
-        supabase.from('appointments').select('id, barber_id, client_id, appointment_date, start_time, end_time, status, notes, is_blockout, clients ( id, name, phone, notes, is_red_listed, red_listed_by, red_listed_reason, no_show_count )').eq('barber_id', selectedBarberId).gte('appointment_date', startOfWeek).lte('appointment_date', endOfWeek).neq('status', 'cancelled').order('start_time', { ascending: true }),
+        supabase.from('appointments').select('id, barber_id, client_id, service_id, appointment_date, start_time, end_time, status, notes, is_blockout, clients ( id, name, phone, notes, is_red_listed, red_listed_by, red_listed_reason, no_show_count ), services ( id, name, duration_minutes, price )').eq('barber_id', selectedBarberId).gte('appointment_date', startOfWeek).lte('appointment_date', endOfWeek).neq('status', 'cancelled').order('start_time', { ascending: true }),
         supabase.from('schedule_overrides').select('override_date, is_off').eq('barber_id', selectedBarberId).gte('override_date', startOfWeek).lte('override_date', endOfWeek)
       ])
       setWeekAppointments(apptRes.data || [])
@@ -889,7 +922,8 @@ export default function AdminDashboard() {
         end_time: endTimeStr,
         status: isBlockoutMode ? 'blocked' : 'booked',
         notes: bookNotes.trim() || (isBlockoutMode ? 'Blocked Time' : null),
-        is_blockout: isBlockoutMode
+        is_blockout: isBlockoutMode,
+        barber_seen_at: new Date().toISOString()
       }
       if (!isBlockoutMode && bookService?.id) {
         insertPayload.service_id = bookService.id
@@ -1105,7 +1139,7 @@ export default function AdminDashboard() {
       const totalMinutes = hours * 60 + minutes + walkInService.duration_minutes
       const endTimeStr = `${Math.floor(totalMinutes / 60).toString().padStart(2, '0')}:${(totalMinutes % 60).toString().padStart(2, '0')}:00`
 
-      await supabase.from('appointments').insert({ barber_id: targetBarberId, client_id: clientId, appointment_date: selectedDate, start_time: `${time}:00`, end_time: endTimeStr, status: 'walk-in' })
+      await supabase.from('appointments').insert({ barber_id: targetBarberId, client_id: clientId, appointment_date: selectedDate, start_time: `${time}:00`, end_time: endTimeStr, status: 'walk-in', barber_seen_at: new Date().toISOString() })
       setWalkInService(null); setSelectedBarberId(targetBarberId); setActiveModule('calendar'); setRefreshTrigger(prev => prev + 1)
     } catch (error) { console.error(error); alert("Failed to block chair.") }
     finally { setIsExpressBooking(false) }
@@ -1163,28 +1197,89 @@ export default function AdminDashboard() {
         const { data: newClient } = await supabase.from('clients').insert({ name: 'Blocked', phone: "0000000000" }).select().single()
         clientId = newClient?.id
       }
-      await supabase.from('appointments').insert({ barber_id: selectedBarberId, client_id: clientId, appointment_date: selectedDate, start_time: `${blockStart}:00`, end_time: `${blockEnd}:00`, status: 'blocked' })
+      await supabase.from('appointments').insert({ barber_id: selectedBarberId, client_id: clientId, appointment_date: selectedDate, start_time: `${blockStart}:00`, end_time: `${blockEnd}:00`, status: 'blocked', barber_seen_at: new Date().toISOString() })
       setShowManageDayModal(false); setBlockStart(''); setBlockEnd(''); setRefreshTrigger(prev => prev + 1)
     } catch (err) { console.error(err); alert("Failed to block time.") }
     finally { setIsSavingOverride(false) }
   }
 
   // --- APPOINTMENT DETAILS & CUT NOTES LOGIC ---
+  const handleAcknowledgeBooking = async (bookingId: string) => {
+    setAcknowledgingId(bookingId)
+    try {
+      const seenAt = new Date().toISOString()
+      const { error } = await supabase
+        .from('appointments')
+        .update({ barber_seen_at: seenAt })
+        .eq('id', bookingId)
+      if (error) throw error
+      setUnseenBookings(prev => prev.filter(b => b.id !== bookingId))
+    } catch (err) {
+      console.error('Failed to acknowledge booking:', err)
+      alert('Failed to acknowledge booking.')
+    } finally {
+      setAcknowledgingId(null)
+    }
+  }
+
+  const handleClearAllBarberAlerts = async () => {
+    if (!selectedBarberId) return
+    setClearingAllAlerts(true)
+    try {
+      const seenAt = new Date().toISOString()
+      const { error } = await supabase
+        .from('appointments')
+        .update({ barber_seen_at: seenAt })
+        .eq('barber_id', selectedBarberId)
+        .is('barber_seen_at', null)
+      if (error) throw error
+      setUnseenBookings(prev => prev.filter(b => b.barber_id !== selectedBarberId))
+    } catch (err) {
+      console.error('Failed to clear barber alerts:', err)
+      alert('Failed to clear alerts.')
+    } finally {
+      setClearingAllAlerts(false)
+    }
+  }
+
+  const handleJumpToAlertSlot = (booking: any) => {
+    if (!booking?.appointment_date) return
+    setSelectedDate(booking.appointment_date)
+    setBookDate(booking.appointment_date)
+    setViewMode('day')
+    setActiveModule('calendar')
+    setShowAlertsModal(false)
+  }
+
   const handleOpenAppt = async (appt: any) => {
     setSelectedAppt(appt)
     setClientNotes(appt.clients?.notes || '')
     setShowApptModal(true)
     const targetClientId = appt?.clients?.id || appt?.client_id
-    if (targetClientId) {
-      const { data: freshClient } = await supabase
-        .from('clients')
-        .select('id, name, phone, notes, is_red_listed, red_listed_by, red_listed_reason, no_show_count')
-        .eq('id', targetClientId)
-        .maybeSingle()
-      if (freshClient) {
-        setClientNotes(freshClient.notes || '')
-        setSelectedAppt((prev: any) => prev ? { ...prev, clients: freshClient } : prev)
-      }
+    const targetServiceId = appt?.service_id
+    const [clientRes, serviceRes] = await Promise.all([
+      targetClientId
+        ? supabase
+            .from('clients')
+            .select('id, name, phone, notes, is_red_listed, red_listed_by, red_listed_reason, no_show_count')
+            .eq('id', targetClientId)
+            .maybeSingle()
+        : Promise.resolve({ data: null }),
+      !appt?.services && targetServiceId
+        ? supabase
+            .from('services')
+            .select('id, name, duration_minutes, price')
+            .eq('id', targetServiceId)
+            .maybeSingle()
+        : Promise.resolve({ data: null })
+    ])
+    if (clientRes.data || serviceRes.data) {
+      if (clientRes.data) setClientNotes(clientRes.data.notes || '')
+      setSelectedAppt((prev: any) => prev ? {
+        ...prev,
+        clients: clientRes.data || prev.clients,
+        services: serviceRes.data || prev.services
+      } : prev)
     }
   }
 
@@ -2003,7 +2098,7 @@ export default function AdminDashboard() {
                 <>
                   <div
                     className="absolute right-0 pr-1 sm:pr-1.5 text-right -translate-y-1/2 flex items-center justify-end gap-0.5 sm:gap-1 pointer-events-none"
-                    style={{ top: `${hourIdx * PIXELS_PER_HOUR + 20}px` }}
+                    style={{ top: `${hourIdx * PIXELS_PER_HOUR + SLOT_HEIGHT}px` }}
                   >
                     <span className="text-[8px] sm:text-[9px] font-mono text-[var(--color-brand-muted)] opacity-50 leading-none">
                       :15
@@ -2012,7 +2107,7 @@ export default function AdminDashboard() {
                   </div>
                   <div
                     className="absolute right-0 pr-1 sm:pr-1.5 text-right -translate-y-1/2 flex items-center justify-end gap-0.5 sm:gap-1 pointer-events-none"
-                    style={{ top: `${hourIdx * PIXELS_PER_HOUR + 40}px` }}
+                    style={{ top: `${hourIdx * PIXELS_PER_HOUR + SLOT_HEIGHT * 2}px` }}
                   >
                     <span className="text-[8px] sm:text-[9px] font-mono text-[var(--color-brand-muted)] opacity-70 leading-none">
                       :30
@@ -2021,7 +2116,7 @@ export default function AdminDashboard() {
                   </div>
                   <div
                     className="absolute right-0 pr-1 sm:pr-1.5 text-right -translate-y-1/2 flex items-center justify-end gap-0.5 sm:gap-1 pointer-events-none"
-                    style={{ top: `${hourIdx * PIXELS_PER_HOUR + 60}px` }}
+                    style={{ top: `${hourIdx * PIXELS_PER_HOUR + SLOT_HEIGHT * 3}px` }}
                   >
                     <span className="text-[8px] sm:text-[9px] font-mono text-[var(--color-brand-muted)] opacity-50 leading-none">
                       :45
@@ -2058,7 +2153,7 @@ export default function AdminDashboard() {
       const relativeY = (clientY - containerTop) + scrollTop - columnOffsetTop
 
       const maxSlotIndex = (TOTAL_HOURS * 4) - 1
-      const slotIndex = Math.max(0, Math.min(maxSlotIndex, Math.floor(relativeY / (PIXELS_PER_HOUR / 4))))
+      const slotIndex = Math.max(0, Math.min(maxSlotIndex, Math.floor(relativeY / SLOT_HEIGHT)))
       const totalMins = CALENDAR_START_HOUR * 60 + (slotIndex * 15)
       const slotTime = `${Math.floor(totalMins / 60).toString().padStart(2, '0')}:${(totalMins % 60).toString().padStart(2, '0')}`
       setHoveredDropSlot({ date: colDate, time: slotTime })
@@ -2097,7 +2192,7 @@ export default function AdminDashboard() {
       const relativeY = (clientY - containerTop) + scrollTop - columnOffsetTop
 
       const maxSlotIndex = (TOTAL_HOURS * 4) - 1
-      const slotIndex = Math.max(0, Math.min(maxSlotIndex, Math.floor(relativeY / (PIXELS_PER_HOUR / 4))))
+      const slotIndex = Math.max(0, Math.min(maxSlotIndex, Math.floor(relativeY / SLOT_HEIGHT)))
       const totalMins = CALENDAR_START_HOUR * 60 + (slotIndex * 15)
       const slotTime = `${Math.floor(totalMins / 60).toString().padStart(2, '0')}:${(totalMins % 60).toString().padStart(2, '0')}`
       handleDropReschedule(appt, targetDate, slotTime)
@@ -2398,6 +2493,8 @@ export default function AdminDashboard() {
 
           const redListCardClass = isRedListed ? '!border-red-500 ring-1 ring-red-500/60' : ''
 
+          const serviceName = appt.services?.name || 'Service'
+
           if (isWeekView) {
             return (
               <button
@@ -2423,16 +2520,27 @@ export default function AdminDashboard() {
                   touchAction: isThisBeingDragged ? 'none' : 'pan-y'
                 }}
               >
+                {!isBlockout && !isBlocked && (
+                  <div className={`text-[8px] sm:text-[9px] font-extrabold uppercase tracking-tight leading-tight truncate overflow-hidden whitespace-nowrap w-full pointer-events-none ${
+                    isCompleted
+                      ? (isLight ? 'text-emerald-800' : 'text-emerald-300')
+                      : isLight
+                      ? 'text-[var(--color-brand-periwinkle)]'
+                      : 'text-[var(--color-brand-gold)]'
+                  }`}>
+                    ✂️ {serviceName}
+                  </div>
+                )}
                 <div className="text-[9px] sm:text-[10px] font-bold leading-tight truncate overflow-hidden whitespace-nowrap w-full pointer-events-none">
-                  {isRedListed ? '🚩 ' : ''}{formatTime(appt.start_time).replace(':00', '')} {isBlockout ? (appt.notes || 'Blocked') : isBlocked ? 'BLOCKED' : appt.clients?.name || 'Walk-In'}
+                  {isRedListed ? '🚩 ' : ''}{isBlockout ? (appt.notes || 'Blocked') : isBlocked ? 'BLOCKED' : appt.clients?.name || 'Walk-In'}
                 </div>
-                {isRedListed && height >= 28 ? (
+                {isRedListed && height >= 42 ? (
                   <div className="text-[8px] font-extrabold bg-red-600 text-white px-1 py-px rounded truncate leading-tight mt-0.5 w-fit max-w-full pointer-events-none">
                     🚩 RED LIST • OWES {redListedOwedBy}
                   </div>
-                ) : height >= 35 ? (
+                ) : height >= 45 ? (
                   <div className="text-[8px] sm:text-[9px] opacity-75 truncate overflow-hidden whitespace-nowrap leading-none mt-0.5 w-full pointer-events-none">
-                    {isBlockout ? formatTime(appt.end_time).replace(':00', '') : isBlocked ? 'Blocked' : formatTime(appt.end_time).replace(':00', '')}
+                    {formatTime(appt.start_time).replace(':00', '')}
                   </div>
                 ) : null}
               </button>
@@ -2452,7 +2560,7 @@ export default function AdminDashboard() {
                 if (touchDraggedAppt || isTouchDragging || justDraggedRef.current || isDragActiveRef.current) return
                 handleOpenAppt(appt)
               }}
-              className={`absolute left-1.5 right-1.5 m-0 box-border rounded-lg p-2 overflow-hidden border shadow-md flex flex-col text-left z-20 cursor-grab active:cursor-grabbing hover:brightness-110 transition-all select-none ${
+              className={`absolute left-1.5 right-1.5 m-0 box-border rounded-lg p-1.5 sm:p-2 overflow-hidden border shadow-md flex flex-col text-left z-20 cursor-grab active:cursor-grabbing hover:brightness-110 transition-all select-none ${
                 isThisBeingDragged
                   ? 'scale-105 shadow-2xl ring-2 ring-[var(--color-brand-accent)] z-30 opacity-80 animate-pulse touch-none'
                   : 'touch-pan-y'
@@ -2463,41 +2571,73 @@ export default function AdminDashboard() {
                 touchAction: isThisBeingDragged ? 'none' : 'pan-y'
               }}
             >
-              {height <= 25 ? (
-                <div className="flex items-center justify-between text-xs font-bold leading-none pointer-events-none">
-                  <span className="truncate flex items-center gap-1">
+              {height <= 32 ? (
+                <div className="flex items-center justify-between gap-2 text-xs font-bold leading-none pointer-events-none my-auto">
+                  <span className="truncate flex items-center gap-1.5">
                     {isBlockout ? <Ban className={`w-3 h-3 flex-shrink-0 ${isLight ? 'text-slate-600' : 'text-zinc-400'}`} /> : isBlocked && <Lock className={`w-3 h-3 flex-shrink-0 ${isLight ? 'text-orange-600' : 'text-orange-400'}`} />}
+                    {!isBlockout && !isBlocked && (
+                      <span className={`font-extrabold uppercase tracking-wide flex-shrink-0 ${
+                        isCompleted ? (isLight ? 'text-emerald-800' : 'text-emerald-300') : isLight ? 'text-[var(--color-brand-periwinkle)]' : 'text-[var(--color-brand-gold)]'
+                      }`}>
+                        ✂️ {serviceName}
+                      </span>
+                    )}
                     {isRedListed && <span className="bg-red-600 text-white text-[9px] font-extrabold px-1 rounded flex-shrink-0">🚩 RED LIST • OWES {redListedOwedBy}</span>}
-                    {isBlockout ? (appt.notes || 'Blocked Time') : isBlocked ? 'BLOCKED TIME' : appt.clients?.name || 'Walk-In'}
+                    <span className="truncate text-sm font-bold">
+                      {isBlockout ? (appt.notes || 'Blocked Time') : isBlocked ? 'BLOCKED TIME' : appt.clients?.name || 'Walk-In'}
+                    </span>
                   </span>
-                  <span className="text-[10px] opacity-80 flex-shrink-0 ml-1">
+                  <span className="text-xs opacity-85 flex-shrink-0">
                     {formatTime(appt.start_time)}
                   </span>
                 </div>
               ) : (
                 <div className="pointer-events-none flex flex-col h-full">
-                  <div className={`text-xs font-bold flex items-center justify-between gap-1 ${
-                    isBlockout ? (isLight ? 'text-slate-600' : 'text-zinc-400') : isBlocked ? (isLight ? 'text-orange-700' : 'text-orange-400') : isCompleted ? (isLight ? 'text-emerald-700' : 'text-emerald-400') : 'text-[var(--color-brand-accent)]'
-                  }`}>
-                    <span className="flex items-center gap-1 truncate">
-                      {isBlockout ? <Ban className="w-3 h-3 flex-shrink-0" /> : isBlocked && <Lock className="w-3 h-3 flex-shrink-0" />}
-                      {formatTime(appt.start_time)} - {formatTime(appt.end_time)}
-                    </span>
+                  <div className="flex items-center justify-between gap-1.5">
+                    {isBlockout ? (
+                      <span className={`text-xs font-bold uppercase tracking-wide flex items-center gap-1 truncate ${isLight ? 'text-slate-600' : 'text-zinc-400'}`}>
+                        <Ban className="w-3.5 h-3.5 flex-shrink-0" /> Blockout
+                      </span>
+                    ) : isBlocked ? (
+                      <span className={`text-xs font-bold uppercase tracking-wide flex items-center gap-1 truncate ${isLight ? 'text-orange-700' : 'text-orange-400'}`}>
+                        <Lock className="w-3.5 h-3.5 flex-shrink-0" /> Blocked Time
+                      </span>
+                    ) : (
+                      <span className={`text-xs font-extrabold uppercase tracking-wide truncate ${
+                        isCompleted
+                          ? (isLight ? 'text-emerald-800' : 'text-emerald-300')
+                          : isLight
+                          ? 'text-[var(--color-brand-periwinkle)]'
+                          : 'text-[var(--color-brand-gold)]'
+                      }`}>
+                        ✂️ {serviceName}
+                      </span>
+                    )}
                     <span className="flex items-center gap-1 flex-shrink-0">
                       {isRedListed && (
                         <span className="bg-red-600 text-white text-[9px] sm:text-[10px] font-extrabold px-1.5 py-0.5 rounded shadow-sm whitespace-nowrap">
                           🚩 RED LIST • OWES {redListedOwedBy}
                         </span>
                       )}
-                      {appt.notes && !isBlockout && <FileText className="w-3 h-3 flex-shrink-0 opacity-80" />}
+                      {appt.notes && !isBlockout && <FileText className="w-3.5 h-3.5 flex-shrink-0 opacity-80" />}
                     </span>
                   </div>
-                  <div className={`text-xs truncate font-bold mt-0.5 ${isBlockout ? (isLight ? 'text-slate-800' : 'text-zinc-200') : 'text-[var(--color-brand-light)]'}`}>
+                  <div className={`text-sm truncate font-bold mt-0.5 leading-snug ${isBlockout ? (isLight ? 'text-slate-800' : 'text-zinc-200') : 'text-[var(--color-brand-light)]'}`}>
                     {isBlockout ? (appt.notes || 'Blocked Time') : isBlocked ? 'BLOCKED TIME' : appt.clients?.name || 'Walk-In'}
                   </div>
-                  {height >= 55 && !isBlockout && appt.clients?.phone && appt.clients?.phone !== '0000000000' && (
-                    <div className="text-[10px] text-[var(--color-brand-muted)] font-mono mt-auto truncate">
-                      {appt.clients.phone}
+                  <div className={`text-xs font-semibold truncate mt-0.5 ${
+                    isBlockout ? (isLight ? 'text-slate-600' : 'text-zinc-400') : isBlocked ? (isLight ? 'text-orange-700' : 'text-orange-400') : isCompleted ? (isLight ? 'text-emerald-700' : 'text-emerald-400') : 'text-[var(--color-brand-accent)]'
+                  }`}>
+                    {formatTime(appt.start_time)} - {formatTime(appt.end_time)}
+                  </div>
+                  {height >= 85 && !isBlockout && (
+                    <div className="mt-auto flex items-center justify-between gap-2 text-[11px] text-[var(--color-brand-muted)] truncate">
+                      {appt.clients?.phone && appt.clients?.phone !== '0000000000' && (
+                        <span className="font-mono truncate">{formatPhoneNumber(appt.clients.phone)}</span>
+                      )}
+                      {appt.notes && (
+                        <span className="italic truncate opacity-85">{appt.notes}</span>
+                      )}
                     </div>
                   )}
                 </div>
@@ -2518,6 +2658,11 @@ export default function AdminDashboard() {
            <div className="bg-[var(--color-brand-800)] w-full max-w-md rounded-2xl flex flex-col border border-[var(--color-brand-700)] shadow-2xl overflow-hidden max-h-[90vh]">
               <div className="flex items-center justify-between p-6 border-b border-[var(--color-brand-700)] flex-shrink-0">
                 <div>
+                  {!selectedAppt.is_blockout && selectedAppt.services?.name && (
+                    <p className="text-xs font-extrabold uppercase tracking-wider text-[var(--color-brand-gold)] mb-1">
+                      ✂️ {selectedAppt.services.name}
+                    </p>
+                  )}
                   <h2 className="text-xl font-bold">
                     {selectedAppt.is_blockout ? (selectedAppt.notes || 'Blocked Time') : selectedAppt.clients?.name || 'Walk-In'}
                   </h2>
@@ -3492,6 +3637,130 @@ export default function AdminDashboard() {
           </div>
         </div>
       )}
+
+      {/* PER-BARBER NEW BOOKING ALERTS DRAWER / MODAL */}
+      {showAlertsModal && (() => {
+        const activeBarberObj = barbers.find(b => b.id === selectedBarberId)
+        const activeBarberFirstName = activeBarberObj?.name?.split(' ')[0] || 'Barber'
+        const activeUnseenList = unseenBookings.filter(b => b.barber_id === selectedBarberId)
+
+        return (
+          <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
+            <div className="bg-[var(--color-brand-800)] w-full max-w-lg rounded-2xl flex flex-col border border-[var(--color-brand-700)] shadow-2xl overflow-hidden max-h-[90vh]">
+              <div className="flex items-center justify-between p-5 border-b border-[var(--color-brand-700)] flex-shrink-0 gap-3">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="w-9 h-9 rounded-full bg-[var(--color-brand-900)] border border-[#D4AF37]/60 flex items-center justify-center text-[var(--color-brand-gold)] flex-shrink-0">
+                    <Bell className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <h2 className="text-lg font-bold truncate">
+                      New Booking Alerts — {activeBarberFirstName}
+                    </h2>
+                    <p className="text-xs text-[var(--color-brand-muted)]">
+                      {activeUnseenList.length} unseen online {activeUnseenList.length === 1 ? 'booking' : 'bookings'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowAlertsModal(false)}
+                  className="text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer p-1"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {activeUnseenList.length > 0 && (
+                <div className="px-5 py-3 bg-[var(--color-brand-900)]/60 border-b border-[var(--color-brand-700)] flex items-center justify-between gap-2 flex-shrink-0">
+                  <span className="text-xs font-semibold text-[var(--color-brand-muted)]">
+                    Switching barber tabs preserves unread alerts.
+                  </span>
+                  <button
+                    type="button"
+                    disabled={clearingAllAlerts}
+                    onClick={handleClearAllBarberAlerts}
+                    className="px-3 py-1.5 rounded-lg bg-[var(--color-brand-accent)] text-white text-xs font-bold hover:brightness-110 transition-all cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                  >
+                    {clearingAllAlerts ? 'Clearing...' : `Clear All for ${activeBarberFirstName}`}
+                  </button>
+                </div>
+              )}
+
+              <div className="p-5 space-y-3 overflow-y-auto flex-1">
+                {activeUnseenList.length === 0 ? (
+                  <div className="text-center py-10 bg-[var(--color-brand-900)]/70 border border-dashed border-[var(--color-brand-700)] rounded-xl p-6">
+                    <CheckCircle2 className="w-8 h-8 text-emerald-400 mx-auto mb-2" />
+                    <p className="text-sm font-bold text-[var(--color-brand-light)]">
+                      All caught up for {activeBarberFirstName}!
+                    </p>
+                    <p className="text-xs text-[var(--color-brand-muted)] mt-1">
+                      New online bookings for {activeBarberFirstName} will appear here until acknowledged.
+                    </p>
+                  </div>
+                ) : (
+                  activeUnseenList.map(booking => (
+                    <div
+                      key={booking.id}
+                      className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-4 space-y-3 shadow-sm"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="text-xs font-extrabold uppercase tracking-wide text-[var(--color-brand-gold)] truncate">
+                            ✂️ {booking.services?.name || 'Service'}
+                          </p>
+                          <h3 className="text-base font-bold text-[var(--color-brand-light)] truncate mt-0.5">
+                            {booking.clients?.name || 'Client'}
+                          </h3>
+                          {booking.clients?.phone && booking.clients.phone !== '0000000000' && (
+                            <p className="text-xs font-mono text-[var(--color-brand-muted)]">
+                              {formatPhoneNumber(booking.clients.phone)}
+                            </p>
+                          )}
+                        </div>
+                        <div className="text-right flex-shrink-0">
+                          <p className="text-xs font-bold text-[var(--color-brand-light)]">
+                            {formatDisplayDate(booking.appointment_date)}
+                          </p>
+                          <p className="text-xs font-semibold text-[var(--color-brand-accent)]">
+                            {formatTime(booking.start_time)} – {formatTime(booking.end_time)}
+                          </p>
+                        </div>
+                      </div>
+
+                      {booking.notes && (
+                        <div className="bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-lg p-2.5 text-xs text-[var(--color-brand-light)] flex items-start gap-2">
+                          <FileText className="w-3.5 h-3.5 text-[var(--color-brand-accent)] flex-shrink-0 mt-0.5" />
+                          <span>{booking.notes}</span>
+                        </div>
+                      )}
+
+                      <div className="flex gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => handleJumpToAlertSlot(booking)}
+                          className="flex-1 py-2 px-3 rounded-lg border border-[var(--color-brand-periwinkle)]/60 bg-[var(--color-brand-periwinkle)]/15 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                        >
+                          <Calendar className="w-3.5 h-3.5" />
+                          <span>Jump to Slot</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={acknowledgingId === booking.id}
+                          onClick={() => handleAcknowledgeBooking(booking.id)}
+                          className="flex-1 py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          <span>{acknowledgingId === booking.id ? 'Saving...' : 'Acknowledge'}</span>
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
     </>
   )
 
@@ -3505,7 +3774,7 @@ export default function AdminDashboard() {
         {/* Touch / Mouse Drag Floating Preview (Visually Detached Chip Following Finger / Cursor) */}
         {touchPos && touchDraggedAppt && isTouchDragging && (() => {
           const durationMins = toMinutes(touchDraggedAppt.end_time) - toMinutes(touchDraggedAppt.start_time)
-          const previewHeight = durationMins * (PIXELS_PER_HOUR / 60)
+          const previewHeight = durationMins * PIXELS_PER_MINUTE
           const isBlockout = Boolean(touchDraggedAppt.is_blockout)
           const isBlocked = touchDraggedAppt.status === 'blocked' || isBlockout
           const isCompleted = touchDraggedAppt.status === 'completed'
@@ -3535,6 +3804,11 @@ export default function AdminDashboard() {
                   <Clock className="w-4 h-4 text-[var(--color-brand-accent)] flex-shrink-0 animate-pulse" />
                 )}
                 <div className="flex flex-col text-left min-w-0">
+                  {!isBlockout && !isBlocked && (
+                    <span className="truncate max-w-[165px] text-[10px] font-extrabold uppercase tracking-wide text-[var(--color-brand-gold)]">
+                      ✂️ {touchDraggedAppt.services?.name || 'Service'}
+                    </span>
+                  )}
                   <span className="truncate max-w-[160px] text-[var(--color-brand-light)] font-bold">
                     {isBlockout ? (touchDraggedAppt.notes || 'Blocked Time') : isBlocked ? 'BLOCKED TIME' : touchDraggedAppt.clients?.name || 'Walk-In'}
                   </span>
@@ -3561,21 +3835,27 @@ export default function AdminDashboard() {
               </button>
 
               {/* Persistent Active Barber Pill Switcher */}
-              <div className="flex items-center gap-1 bg-[var(--color-brand-800)] p-1 rounded-full border border-[var(--color-brand-700)] overflow-x-auto max-w-[210px] sm:max-w-none">
+              <div className="flex items-center gap-1 bg-[var(--color-brand-800)] p-1 rounded-full border border-[var(--color-brand-700)] overflow-x-auto max-w-[235px] sm:max-w-none">
                 {barbers.map(barber => {
                   const isActiveBarber = barber.id === selectedBarberId
+                  const barberUnseenCount = unseenBookings.filter(b => b.barber_id === barber.id).length
                   return (
                     <button
                       key={barber.id}
                       type="button"
                       onClick={() => selectActiveBarber(barber.id)}
-                      className={`px-2.5 sm:px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap transition-all cursor-pointer ${
+                      className={`px-2.5 sm:px-3 py-1 rounded-full text-xs font-bold whitespace-nowrap transition-all cursor-pointer inline-flex items-center gap-1 ${
                         isActiveBarber
                           ? 'bg-[var(--color-brand-accent)] text-white shadow-sm'
                           : 'text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] hover:bg-[var(--color-brand-900)]/60'
                       }`}
                     >
-                      {barber.name.split(' ')[0]}
+                      <span>{barber.name.split(' ')[0]}</span>
+                      {barberUnseenCount > 0 && (
+                        <span className="inline-flex items-center justify-center min-w-[16px] h-[16px] px-1 rounded-full text-[10px] font-extrabold bg-red-600 text-white leading-none">
+                          {barberUnseenCount}
+                        </span>
+                      )}
                     </button>
                   )
                 })}
@@ -3583,6 +3863,25 @@ export default function AdminDashboard() {
             </div>
 
             <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
+              {(() => {
+                const activeBarberUnseenCount = unseenBookings.filter(b => b.barber_id === selectedBarberId).length
+                return (
+                  <button
+                    type="button"
+                    onClick={() => setShowAlertsModal(true)}
+                    title="New Booking Alerts"
+                    aria-label="New Booking Alerts"
+                    className="relative p-1.5 rounded-lg bg-[var(--color-brand-periwinkle)]/15 border border-[var(--color-brand-periwinkle)]/50 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all cursor-pointer"
+                  >
+                    <Bell className="w-4 h-4" />
+                    {activeBarberUnseenCount > 0 && (
+                      <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] font-extrabold flex items-center justify-center shadow-sm">
+                        {activeBarberUnseenCount}
+                      </span>
+                    )}
+                  </button>
+                )
+              })()}
               <button
                 type="button"
                 onClick={toggleTheme}
@@ -3932,6 +4231,27 @@ export default function AdminDashboard() {
             </div>
 
             <div className="flex items-center gap-2 flex-wrap">
+              {(() => {
+                const activeBarberUnseenCount = unseenBookings.filter(b => b.barber_id === selectedBarberId).length
+                return (
+                  <button
+                    type="button"
+                    onClick={() => setShowAlertsModal(true)}
+                    title="New Booking Alerts"
+                    aria-label="New Booking Alerts"
+                    className="relative flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs sm:text-sm font-bold border border-[var(--color-brand-periwinkle)]/60 bg-[var(--color-brand-periwinkle)]/15 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all cursor-pointer"
+                  >
+                    <Bell className="w-4 h-4" />
+                    <span className="hidden sm:inline">Alerts</span>
+                    {activeBarberUnseenCount > 0 && (
+                      <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] font-extrabold flex items-center justify-center leading-none">
+                        {activeBarberUnseenCount}
+                      </span>
+                    )}
+                  </button>
+                )
+              })()}
+
               <button
                 type="button"
                 onClick={toggleTheme}
@@ -3969,18 +4289,24 @@ export default function AdminDashboard() {
               <div className="inline-flex flex-wrap items-center gap-1.5 bg-[var(--color-brand-800)] p-1 rounded-full border border-[#D4AF37]/40">
                 {barbers.map(barber => {
                   const isActiveBarber = barber.id === selectedBarberId
+                  const barberUnseenCount = unseenBookings.filter(b => b.barber_id === barber.id).length
                   return (
                     <button
                       key={barber.id}
                       type="button"
                       onClick={() => selectActiveBarber(barber.id)}
-                      className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
+                      className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer inline-flex items-center gap-1.5 ${
                         isActiveBarber
                           ? 'bg-[var(--color-brand-accent)] text-white shadow-sm ring-1 ring-[#D4AF37]/70'
                           : 'text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] hover:bg-[var(--color-brand-900)]/60'
                       }`}
                     >
-                      {barber.name}
+                      <span>{barber.name}</span>
+                      {barberUnseenCount > 0 && (
+                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-extrabold bg-red-600 text-white leading-none">
+                          {barberUnseenCount}
+                        </span>
+                      )}
                     </button>
                   )
                 })}
