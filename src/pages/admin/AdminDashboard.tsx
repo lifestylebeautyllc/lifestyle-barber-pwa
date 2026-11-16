@@ -2006,9 +2006,21 @@ export default function AdminDashboard() {
   }
   const handleDeleteService = async (serviceId: string) => {
     try {
-      const { error } = await supabase.from('services').delete().eq('id', serviceId)
-      if (error) {
-        // Fallback: soft-delete / archive if past appointments reference this service_id
+      // 1. Detach any appointments referencing this service_id so foreign-key constraints never block deletion
+      await supabase
+        .from('appointments')
+        .update({ service_id: null })
+        .eq('service_id', serviceId)
+
+      // 2. Permanently delete the service row (and select('id') to verify RLS actually deleted the row)
+      const { data: deletedRows, error } = await supabase
+        .from('services')
+        .delete()
+        .eq('id', serviceId)
+        .select('id')
+
+      // 3. Fallback: if DELETE failed or affected 0 rows, soft-archive with is_active: false
+      if (error || !deletedRows || deletedRows.length === 0) {
         const { error: archiveErr } = await supabase
           .from('services')
           .update({ is_active: false })
@@ -2016,15 +2028,20 @@ export default function AdminDashboard() {
         if (archiveErr) {
           setStatusBanner({
             type: 'error',
-            message: `Failed to delete service: ${archiveErr.message || error.message}`
+            message: `Failed to delete service: ${archiveErr.message || error?.message || 'Permission denied'}`
           })
-          alert(`Failed to delete service: ${archiveErr.message || error.message}`)
+          alert(`Failed to delete service: ${archiveErr.message || error?.message || 'Permission denied'}`)
           return
         }
       }
+
       setMyServices(prev => prev.filter(s => s.id !== serviceId))
       setAdminServices(prev => prev.filter(s => s.id !== serviceId))
       setConfirmDeleteServiceId(null)
+      setStatusBanner({
+        type: 'success',
+        message: 'Service permanently removed from your menu.'
+      })
       await fetchMyServices()
     } catch (err: any) {
       console.error('Failed to delete service:', err)
