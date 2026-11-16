@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Calendar as CalendarIcon, Clock, Scissors, User, Phone, CheckCircle2, CalendarPlus, Zap, FileText, Sun, Moon, ChevronLeft, ChevronRight } from 'lucide-react'
+import { ArrowLeft, Calendar as CalendarIcon, Clock, Scissors, User, Phone, CheckCircle2, CalendarPlus, Zap, FileText, Sun, Moon, ChevronLeft, ChevronRight, Plus, X } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { getAvailableSlots, getDayOfWeekFromDateString, getBarberDaySchedule, timeToMinutes, minutesToTime, DAYS_OF_WEEK } from '../../lib/slotEngine'
 
@@ -61,8 +61,13 @@ export default function BarberCalendar() {
     const [barberName, setBarberName] = useState('Loading...')
     const [services, setServices] = useState<Service[]>([])
 
-    const [selectedService, setSelectedService] = useState<Service | null>(null)
+    const [selectedServices, setSelectedServices] = useState<Service[]>([])
+    const [isAddingMoreServices, setIsAddingMoreServices] = useState(false)
     const [selectedDate, setSelectedDate] = useState(() => getLocalTodayStr())
+
+    const totalDurationMinutes = selectedServices.reduce((sum, s) => sum + s.duration_minutes, 0)
+    const totalPrice = selectedServices.reduce((sum, s) => sum + Number(s.price || 0), 0)
+    const combinedServiceNames = selectedServices.map(s => s.name).join(' + ')
 
     const [slots, setSlots] = useState<SlotObj[]>([])
     const [loadingSlots, setLoadingSlots] = useState(false)
@@ -142,31 +147,51 @@ export default function BarberCalendar() {
         fetchData()
     }, [barberId, isWalkIn])
 
+    // Clear selectedTimeGroup and selectedSlot whenever selectedServices changes
+    useEffect(() => {
+        setSelectedTimeGroup(null)
+        setSelectedSlot(null)
+    }, [selectedServices])
+
     // 2. Load Slots: Calculates Math for One Barber OR Scans Entire Shop (+ 14-day auto-scan on service select)
     useEffect(() => {
         let cancelled = false
 
-        async function fetchSlotsForDate(targetDate: string, svc: Service): Promise<SlotObj[]> {
-            if (!barberId) return []
+        async function fetchSlotsForDate(targetDate: string, chosenServices: Service[]): Promise<SlotObj[]> {
+            if (!barberId || chosenServices.length === 0) return []
+            const stackedDuration = chosenServices.reduce((sum, s) => sum + s.duration_minutes, 0)
+
             if (isWalkIn) {
                 const { data: allBarbers } = await supabase.from('barbers').select('*').eq('is_active', true)
                 const barberResults = await Promise.all(
                     (allBarbers || []).map(async (b) => {
-                        const { data: bService } = await supabase
+                        const { data: barberServices } = await supabase
                             .from('services')
-                            .select('id, duration_minutes')
+                            .select('id, name, duration_minutes')
                             .eq('barber_id', b.id)
-                            .eq('name', svc.name)
                             .eq('is_active', true)
-                            .maybeSingle()
-                        if (!bService) return []
-                        const times = await getAvailableSlots(b.id, targetDate, bService.duration_minutes)
+                        if (!barberServices || barberServices.length === 0) return []
+
+                        // Verify this barber offers every service name in chosenServices
+                        const offersAll = chosenServices.every(sel =>
+                            barberServices.some(bs => bs.name === sel.name)
+                        )
+                        if (!offersAll) return []
+
+                        const barberTotalDuration = chosenServices.reduce((sum, sel) => {
+                            const matched = barberServices.find(bs => bs.name === sel.name)
+                            return sum + (matched ? matched.duration_minutes : sel.duration_minutes)
+                        }, 0)
+                        const firstMatchedService = barberServices.find(bs => bs.name === chosenServices[0].name)
+                        if (!firstMatchedService) return []
+
+                        const times = await getAvailableSlots(b.id, targetDate, barberTotalDuration)
                         return times.map(t => ({
                             time: t,
                             barberId: b.id,
                             barberName: b.name,
-                            serviceId: bService.id,
-                            durationMinutes: bService.duration_minutes
+                            serviceId: firstMatchedService.id,
+                            durationMinutes: barberTotalDuration
                         }))
                     })
                 )
@@ -174,19 +199,19 @@ export default function BarberCalendar() {
                 combinedSlots.sort((a, b) => a.time.localeCompare(b.time))
                 return combinedSlots
             } else {
-                const times = await getAvailableSlots(barberId, targetDate, svc.duration_minutes)
+                const times = await getAvailableSlots(barberId, targetDate, stackedDuration)
                 return times.map(t => ({
                     time: t,
                     barberId: barberId,
                     barberName: barberName,
-                    serviceId: svc.id,
-                    durationMinutes: svc.duration_minutes
+                    serviceId: chosenServices[0].id,
+                    durationMinutes: stackedDuration
                 }))
             }
         }
 
         async function loadSlots() {
-            if (!barberId || !selectedDate || !selectedService) return
+            if (!barberId || !selectedDate || selectedServices.length === 0 || isAddingMoreServices) return
 
             if (skipNextLoadRef.current === selectedDate) {
                 skipNextLoadRef.current = null
@@ -195,14 +220,14 @@ export default function BarberCalendar() {
 
             setLoadingSlots(true)
             const todayStr = getLocalTodayStr()
-            const initialSlots = await fetchSlotsForDate(selectedDate, selectedService)
+            const initialSlots = await fetchSlotsForDate(selectedDate, selectedServices)
             if (cancelled) return
 
             if (initialSlots.length === 0 && autoScanPendingRef.current && selectedDate === todayStr) {
                 autoScanPendingRef.current = false
                 for (let offset = 1; offset <= 14; offset++) {
                     const candidateDate = addDaysToDateStr(todayStr, offset)
-                    const nextSlots = await fetchSlotsForDate(candidateDate, selectedService)
+                    const nextSlots = await fetchSlotsForDate(candidateDate, selectedServices)
                     if (cancelled) return
                     if (nextSlots.length > 0) {
                         skipNextLoadRef.current = candidateDate
@@ -224,17 +249,16 @@ export default function BarberCalendar() {
         return () => {
             cancelled = true
         }
-    }, [barberId, selectedDate, selectedService, isWalkIn, barberName])
+    }, [barberId, selectedDate, selectedServices, isAddingMoreServices, isWalkIn, barberName])
 
     const handleBack = () => {
         if (selectedSlot) {
             setSelectedSlot(null)
         } else if (selectedTimeGroup) {
             setSelectedTimeGroup(null)
-        } else if (selectedService) {
-            setSelectedService(null)
+        } else if (selectedServices.length > 0 && !isAddingMoreServices) {
+            setIsAddingMoreServices(true)
             setSelectedTimeGroup(null)
-            setSlots([])
         } else {
             navigate(-1)
         }
@@ -248,7 +272,7 @@ export default function BarberCalendar() {
             return
         }
 
-        if (!clientName || !clientPhone || !selectedSlot) return
+        if (!clientName || !clientPhone || !selectedSlot || selectedServices.length === 0) return
 
         const liveName = clientName.trim()
         const livePhone = cleanPhone(clientPhone)
@@ -263,7 +287,7 @@ export default function BarberCalendar() {
 
         try {
             const [hours, minutes] = selectedSlot.time.split(':').map(Number)
-            const serviceDuration = selectedSlot.durationMinutes || selectedService!.duration_minutes
+            const serviceDuration = selectedSlot.durationMinutes || totalDurationMinutes
             const totalMinutes = hours * 60 + minutes + serviceDuration
             const endHours = Math.floor(totalMinutes / 60)
             const endMins = totalMinutes % 60
@@ -313,16 +337,22 @@ export default function BarberCalendar() {
                 }
             }
 
+            const finalNotes = selectedServices.length > 1
+                ? (trimmedNotes
+                    ? `[Services: ${combinedServiceNames} ($${totalPrice})] ${trimmedNotes}`
+                    : `[Services: ${combinedServiceNames} ($${totalPrice})]`)
+                : (trimmedNotes || null)
+
             // Secure SECURITY DEFINER RPC: handles rate-limiting, overlap guard, client upsert (preserving notes), and appointment insert
             const { data: appointmentId, error: rpcErr } = await supabase.rpc('book_client_appointment', {
                 p_name: liveName,
                 p_phone: livePhone,
                 p_barber_id: selectedSlot.barberId,
-                p_service_id: selectedSlot.serviceId || selectedService!.id,
+                p_service_id: selectedSlot.serviceId || selectedServices[0].id,
                 p_appointment_date: selectedDate,
                 p_start_time: startTimeStr,
                 p_end_time: endTimeStr,
-                p_notes: trimmedNotes || null,
+                p_notes: finalNotes,
                 p_is_walk_in: isWalkIn
             })
             if (rpcErr) throw rpcErr
@@ -334,7 +364,7 @@ export default function BarberCalendar() {
                 await supabase.functions.invoke('twilio-sms', {
                     body: {
                         to: clientPhone,
-                        message: `LifeStyle Barber: Your haircut with ${selectedSlot.barberName} is confirmed for ${friendlyDate} at ${formatTime(selectedSlot.time)}. Reply CANCEL to cancel. Reply STOP to unsubscribe.`
+                        message: `LifeStyle Barber: Your appointment for ${combinedServiceNames} with ${selectedSlot.barberName} is confirmed for ${friendlyDate} at ${formatTime(selectedSlot.time)}. Reply CANCEL to cancel. Reply STOP to unsubscribe.`
                     }
                 })
             } catch (smsErr) {
@@ -355,9 +385,9 @@ export default function BarberCalendar() {
     }
 
     const handleAddToCalendar = () => {
-        if (!selectedDate || !selectedSlot || !selectedService) return
+        if (!selectedDate || !selectedSlot || selectedServices.length === 0) return
         const [hours, minutes] = selectedSlot.time.split(':').map(Number)
-        const totalMins = hours * 60 + minutes + selectedService.duration_minutes
+        const totalMins = hours * 60 + minutes + (selectedSlot.durationMinutes || totalDurationMinutes)
         const endH = Math.floor(totalMins / 60)
         const endM = totalMins % 60
 
@@ -371,8 +401,8 @@ export default function BarberCalendar() {
             'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
             `DTSTART:${formatDateForICS(selectedDate, hours, minutes)}`,
             `DTEND:${formatDateForICS(selectedDate, endH, endM)}`,
-            `SUMMARY:Haircut with ${selectedSlot.barberName}`,
-            `DESCRIPTION:${selectedService.name} at LifeStyle Barber`,
+            `SUMMARY:${combinedServiceNames} with ${selectedSlot.barberName}`,
+            `DESCRIPTION:${combinedServiceNames} at LifeStyle Barber`,
             'END:VEVENT', 'END:VCALENDAR'
         ].join('\n')
 
@@ -385,7 +415,8 @@ export default function BarberCalendar() {
         document.body.removeChild(link)
     }
 
-    const currentStep = !selectedService ? 1 : !selectedSlot ? 2 : 3
+    const isServiceSelectionStep = selectedServices.length === 0 || isAddingMoreServices
+    const currentStep = isServiceSelectionStep ? 1 : !selectedSlot ? 2 : 3
     const todayStr = getLocalTodayStr()
 
     if (bookingComplete) {
@@ -419,7 +450,8 @@ export default function BarberCalendar() {
                         setClientPhone('')
                         setNotes('')
                         setBotTrap('')
-                        setSelectedService(null)
+                        setSelectedServices([])
+                        setIsAddingMoreServices(false)
                         setBookingComplete(false)
                         navigate('/')
                     }} className="w-full bg-[var(--color-brand-periwinkle)]/15 border border-[var(--color-brand-periwinkle)]/60 text-[var(--color-brand-periwinkle)] px-8 py-4 rounded-xl hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all font-semibold cursor-pointer">
@@ -436,7 +468,7 @@ export default function BarberCalendar() {
                 <div className="flex items-center gap-3.5 min-w-0">
                     <button
                         onClick={handleBack}
-                        aria-label={!selectedService ? 'Back to Barbers' : !selectedSlot ? (selectedTimeGroup ? 'Back to Times' : 'Back to Services') : 'Back to Barbers'}
+                        aria-label={isServiceSelectionStep ? 'Back to Barbers' : !selectedSlot ? (selectedTimeGroup ? 'Back to Times' : 'Back to Services') : 'Back to Times'}
                         className="p-3 bg-[var(--color-brand-periwinkle)]/15 border border-[var(--color-brand-periwinkle)]/60 text-[var(--color-brand-periwinkle)] rounded-full hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all cursor-pointer flex-shrink-0 shadow-sm"
                     >
                         <ArrowLeft className="w-5 h-5" />
@@ -448,7 +480,7 @@ export default function BarberCalendar() {
                             </span>
                         </div>
                         <h1 className="text-2xl font-bold tracking-tight truncate">
-                            {!selectedService ? "Select Service" : !selectedSlot ? (selectedTimeGroup ? "Select Barber" : "Select Time") : "Your Details"}
+                            {selectedSlot ? "Your Details" : (selectedServices.length > 0 && !isAddingMoreServices) ? (selectedTimeGroup ? "Select Barber" : "Select Time") : "Select Service"}
                         </h1>
                         <p className="text-[var(--color-brand-muted)] text-sm flex items-center gap-1 truncate">
                             {isWalkIn && !selectedSlot ? <><Zap className="w-3 h-3 text-[var(--color-brand-gold)] flex-shrink-0"/> Kiosk Mode</> : `Booking with ${selectedSlot ? selectedSlot.barberName : barberName}`}
@@ -467,15 +499,74 @@ export default function BarberCalendar() {
                 </button>
             </header>
 
-            {!selectedService ? (
+            {isServiceSelectionStep ? (
                 <div className="space-y-4 animate-in fade-in slide-in-from-right-4">
+                    {selectedServices.length > 0 && (
+                        <div className="card-violet-gold backdrop-blur-md p-5 rounded-2xl space-y-3.5 border border-[#D4AF37]/60 shadow-lg">
+                            <div className="flex items-center justify-between">
+                                <span className="text-xs font-bold uppercase tracking-wider text-[var(--color-brand-gold)] flex items-center gap-1.5">
+                                    <Scissors className="w-3.5 h-3.5" /> Your Service Lineup
+                                </span>
+                                <span className="text-xs font-bold text-[var(--color-brand-muted)]">
+                                    {selectedServices.length} {selectedServices.length === 1 ? 'Service' : 'Services'} • {totalDurationMinutes} mins • ${totalPrice}
+                                </span>
+                            </div>
+
+                            <div className="space-y-2">
+                                {selectedServices.map((svc, idx) => (
+                                    <div
+                                        key={`${svc.id}-${idx}`}
+                                        className="flex items-center justify-between gap-2 bg-[var(--color-brand-900)]/60 border border-[var(--color-brand-700)]/70 px-3.5 py-2.5 rounded-xl"
+                                    >
+                                        <div className="min-w-0">
+                                            <p className="text-sm font-bold text-[var(--color-brand-light)] truncate">{svc.name}</p>
+                                            <p className="text-xs text-[var(--color-brand-muted)]">
+                                                {svc.duration_minutes} mins • <span className="text-[var(--color-brand-gold)] font-semibold">${svc.price}</span>
+                                            </p>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            aria-label={`Remove ${svc.name}`}
+                                            onClick={() => {
+                                                setSelectedServices(prev => {
+                                                    const next = prev.filter((_, i) => i !== idx)
+                                                    if (next.length === 0) setIsAddingMoreServices(false)
+                                                    return next
+                                                })
+                                            }}
+                                            className="p-1.5 rounded-lg text-[var(--color-brand-muted)] hover:text-red-400 hover:bg-red-500/15 transition-colors cursor-pointer flex-shrink-0"
+                                        >
+                                            <X className="w-4 h-4" />
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    autoScanPendingRef.current = true
+                                    setSelectedDate(getLocalTodayStr())
+                                    setIsAddingMoreServices(false)
+                                    setSelectedTimeGroup(null)
+                                }}
+                                className="w-full bg-[var(--color-brand-accent)] text-white font-bold py-3.5 px-4 rounded-xl hover:brightness-110 transition-all shadow-[0_0_16px_rgba(168,85,247,0.3)] cursor-pointer flex items-center justify-center gap-2 text-sm sm:text-base"
+                            >
+                                Continue to Select Time →
+                            </button>
+
+                            <p className="text-[11px] text-center text-[var(--color-brand-muted)]">
+                                Or tap another service below to stack onto this booking:
+                            </p>
+                        </div>
+                    )}
+
                     {services.map(service => (
                         <button
                             key={service.id}
                             onClick={() => {
-                                autoScanPendingRef.current = true
-                                setSelectedDate(getLocalTodayStr())
-                                setSelectedService(service)
+                                setSelectedServices(prev => [...prev, service])
+                                setIsAddingMoreServices(true)
                                 setSelectedTimeGroup(null)
                             }}
                             className="w-full card-violet-gold transition-all p-6 rounded-2xl flex items-center justify-between group cursor-pointer backdrop-blur-md"
@@ -484,34 +575,51 @@ export default function BarberCalendar() {
                                 <h2 className="text-lg font-bold">{service.name}</h2>
                                 <p className="text-sm text-[var(--color-brand-muted)]">{service.duration_minutes} Minutes</p>
                             </div>
-                            <div className="text-lg font-bold text-[var(--color-brand-gold)] bg-[var(--color-brand-900)]/60 border border-[#D4AF37]/50 px-3 py-1 rounded-xl">
-                                ${service.price}
+                            <div className="flex items-center gap-2">
+                                <div className="text-lg font-bold text-[var(--color-brand-gold)] bg-[var(--color-brand-900)]/60 border border-[#D4AF37]/50 px-3 py-1 rounded-xl">
+                                    ${service.price}
+                                </div>
                             </div>
                         </button>
                     ))}
                 </div>
             ) : !selectedSlot ? (
                 <div className="animate-in fade-in slide-in-from-right-4 duration-300">
-                    <div className="card-violet-gold backdrop-blur-md p-4 rounded-2xl mb-6 flex items-center justify-between">
-                        <div>
-                            <p className="text-xs text-[var(--color-brand-muted)] uppercase tracking-wider font-bold mb-1">Selected Service</p>
-                            <p className="font-bold">{selectedService.name} ({selectedService.duration_minutes}m)</p>
+                    <div className="card-violet-gold backdrop-blur-md p-4 rounded-2xl mb-6 space-y-3">
+                        <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                                <p className="text-xs text-[var(--color-brand-muted)] uppercase tracking-wider font-bold mb-1">
+                                    {selectedServices.length > 1 ? `Selected Services (${selectedServices.length})` : 'Selected Service'}
+                                </p>
+                                <p className="font-bold text-sm sm:text-base leading-snug">{combinedServiceNames}</p>
+                                <p className="text-xs text-[var(--color-brand-gold)] font-semibold mt-0.5">
+                                    {totalDurationMinutes}m • ${totalPrice}
+                                </p>
+                            </div>
+                            <div className="p-2 rounded-full bg-[var(--color-brand-900)]/70 border border-[#D4AF37]/60 flex-shrink-0">
+                                <Scissors className="w-4 h-4 text-[var(--color-brand-gold)]" />
+                            </div>
                         </div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 pt-1 border-t border-[var(--color-brand-700)]/50">
+                            <button
+                                type="button"
+                                onClick={() => setIsAddingMoreServices(true)}
+                                className="flex-1 flex items-center justify-center gap-1.5 text-xs font-bold text-[var(--color-brand-periwinkle)] hover:text-white px-3 py-2 rounded-xl bg-[var(--color-brand-periwinkle)]/15 border border-[var(--color-brand-periwinkle)]/60 hover:bg-[var(--color-brand-periwinkle)] transition-all cursor-pointer"
+                            >
+                                <Plus className="w-3.5 h-3.5" /> Add Another Service
+                            </button>
                             <button
                                 type="button"
                                 onClick={() => {
-                                    setSelectedService(null)
+                                    setSelectedServices([])
+                                    setIsAddingMoreServices(false)
                                     setSelectedTimeGroup(null)
                                     setSlots([])
                                 }}
-                                className="text-xs font-bold text-[var(--color-brand-periwinkle)] hover:text-white px-2.5 py-1 rounded-lg bg-[var(--color-brand-periwinkle)]/15 border border-[var(--color-brand-periwinkle)]/60 hover:bg-[var(--color-brand-periwinkle)] transition-all cursor-pointer"
+                                className="text-xs font-bold text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] px-3 py-2 rounded-xl bg-[var(--color-brand-900)]/50 border border-[var(--color-brand-700)] transition-all cursor-pointer"
                             >
-                                Back to Services
+                                Clear
                             </button>
-                            <div className="p-2 rounded-full bg-[var(--color-brand-900)]/70 border border-[#D4AF37]/60">
-                                <Scissors className="w-4 h-4 text-[var(--color-brand-gold)]" />
-                            </div>
                         </div>
                     </div>
 
@@ -624,7 +732,7 @@ export default function BarberCalendar() {
                                                         {slot.barberName}
                                                     </h3>
                                                     <p className="text-xs text-[var(--color-brand-muted)] font-medium">
-                                                        {selectedService.name} • {slot.durationMinutes || selectedService.duration_minutes}m
+                                                        {combinedServiceNames} • {slot.durationMinutes || totalDurationMinutes}m
                                                     </p>
                                                 </div>
                                             </div>
@@ -657,7 +765,7 @@ export default function BarberCalendar() {
                         />
                     </div>
 
-                    <div className="card-violet-gold backdrop-blur-md p-4 rounded-2xl mb-8 space-y-2">
+                    <div className="card-violet-gold backdrop-blur-md p-4 rounded-2xl mb-8 space-y-3">
                         <div className="flex items-center justify-between gap-2">
                             <p className="text-xs text-[var(--color-brand-gold)] uppercase tracking-wider font-bold">Appointment Summary</p>
                             <button
@@ -668,8 +776,24 @@ export default function BarberCalendar() {
                                 Back to Times
                             </button>
                         </div>
-                        <p className="font-bold text-lg">{selectedService.name}</p>
-                        <p className="text-[var(--color-brand-muted)]">{formatFriendlyDate(selectedDate, selectedSlot.time)}</p>
+
+                        <div className="space-y-1.5 pt-1">
+                            {selectedServices.map((svc, idx) => (
+                                <div key={`${svc.id}-${idx}`} className="flex items-center justify-between text-sm">
+                                    <span className="font-bold text-[var(--color-brand-light)]">{svc.name}</span>
+                                    <span className="text-xs text-[var(--color-brand-muted)]">
+                                        {svc.duration_minutes} mins • <span className="text-[var(--color-brand-gold)] font-semibold">${svc.price}</span>
+                                    </span>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="flex items-center justify-between pt-2 border-t border-[var(--color-brand-700)]/60 text-xs sm:text-sm font-bold">
+                            <span className="text-[var(--color-brand-muted)]">Combined Total</span>
+                            <span className="text-[var(--color-brand-gold)]">{totalDurationMinutes} mins • ${totalPrice}</span>
+                        </div>
+
+                        <p className="text-sm text-[var(--color-brand-muted)] pt-1">{formatFriendlyDate(selectedDate, selectedSlot.time)}</p>
                     </div>
 
                     <div className="space-y-4 mb-8">

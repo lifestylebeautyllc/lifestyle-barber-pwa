@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
-import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Power, PowerOff, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, UserX, Trash2, FileText, Clock, Ban, Search, Upload, Download, Flag, AlertTriangle, History, CheckCircle2, Sun, Moon, ExternalLink, Delete, Bell } from 'lucide-react'
+import { Shield, LogOut, Calendar, Users, Settings, ArrowLeft, Phone, User, Plus, X, Lock, Zap, Scissors, Edit, Save, SlidersHorizontal, ChevronLeft, ChevronRight, MessageSquare, UserX, Trash2, FileText, Clock, Ban, Search, Upload, Download, Flag, AlertTriangle, History, CheckCircle2, Sun, Moon, ExternalLink, Delete, Bell } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
 import { getAvailableSlots, getBarberDaySchedule, minutesToTime, DAYS_OF_WEEK, DEFAULT_WORKING_HOURS, type DaySchedule } from '../../lib/slotEngine'
 
@@ -259,6 +259,7 @@ export default function AdminDashboard() {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null)
   const dayScrollContainerRef = useRef<HTMLDivElement | null>(null)
   const weekScrollContainerRef = useRef<HTMLDivElement | null>(null)
+  const calendarSwipeStartRef = useRef<{ x: number; y: number; startedOnAppt: boolean } | null>(null)
 
   // --- MODALS STATE ---
   const [showBookModal, setShowBookModal] = useState(false)
@@ -312,6 +313,7 @@ export default function AdminDashboard() {
   const [isSubmittingService, setIsSubmittingService] = useState(false)
   const [editingServiceId, setEditingServiceId] = useState<string | null>(null)
   const [editForm, setEditForm] = useState({ name: '', duration: '30', price: '' })
+  const [confirmDeleteServiceId, setConfirmDeleteServiceId] = useState<string | null>(null)
 
   // --- CLIENT DIRECTORY CRM & VAGARO CSV IMPORTER STATE ---
   const [clientsList, setClientsList] = useState<Client[]>([])
@@ -734,17 +736,22 @@ export default function AdminDashboard() {
     setSelectedDate(`${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}-${String(cur.getDate()).padStart(2, '0')}`)
   }
 
-  const handlePrev = () => {
-    if (viewMode === 'month') handlePrevMonth()
-    else if (viewMode === 'week') handlePrevWeek()
-    else handlePrevDay()
+  const stepCalendarPeriod = (direction: -1 | 1) => {
+    if (viewMode === 'month') {
+      if (direction === -1) handlePrevMonth()
+      else handleNextMonth()
+    } else if (viewMode === 'week') {
+      if (direction === -1) handlePrevWeek()
+      else handleNextWeek()
+    } else {
+      if (direction === -1) handlePrevDay()
+      else handleNextDay()
+    }
   }
 
-  const handleNext = () => {
-    if (viewMode === 'month') handleNextMonth()
-    else if (viewMode === 'week') handleNextWeek()
-    else handleNextDay()
-  }
+  const handlePrev = () => stepCalendarPeriod(-1)
+
+  const handleNext = () => stepCalendarPeriod(1)
 
   const handleToday = () => {
     const d = new Date()
@@ -768,10 +775,26 @@ export default function AdminDashboard() {
 
   const fetchMyServices = async () => {
     if (!selectedBarberId) return
-    const { data } = await supabase.from('services').select('*').eq('barber_id', selectedBarberId).order('is_active', { ascending: false }).order('name', { ascending: true })
-    setMyServices(data || [])
+    const { data } = await supabase
+      .from('services')
+      .select('*')
+      .eq('barber_id', selectedBarberId)
+      .eq('is_active', true)
+      .order('name', { ascending: true })
+    const activeOnly = (data || []).filter(s => s.is_active !== false)
+    setMyServices(activeOnly)
+    setAdminServices(activeOnly)
   }
   useEffect(() => { if (session && activeModule === 'services' && selectedBarberId) fetchMyServices() }, [session, activeModule, selectedBarberId])
+
+  // Auto-reset inline 2-tap Delete Service confirmation after 4000ms
+  useEffect(() => {
+    if (!confirmDeleteServiceId) return
+    const timer = window.setTimeout(() => {
+      setConfirmDeleteServiceId(null)
+    }, 4000)
+    return () => window.clearTimeout(timer)
+  }, [confirmDeleteServiceId])
 
   // --- CLIENT DIRECTORY AUTO-FETCH (runs when Clients tab opens OR refreshTrigger updates) ---
   const fetchClientsDirectory = async () => {
@@ -1981,8 +2004,36 @@ export default function AdminDashboard() {
     setIsSubmittingService(true)
     try { await supabase.from('services').insert({ barber_id: selectedBarberId, name: newServiceName, duration_minutes: parseInt(newServiceDuration), price: parseFloat(newServicePrice), is_active: true }); setNewServiceName(''); setNewServicePrice(''); setNewServiceDuration('30'); fetchMyServices() } catch (err) { console.error(err) } finally { setIsSubmittingService(false) }
   }
-  const handleToggleService = async (serviceId: string, currentStatus: boolean) => {
-    try { await supabase.from('services').update({ is_active: !currentStatus }).eq('id', serviceId); fetchMyServices() } catch (err) { console.error(err) }
+  const handleDeleteService = async (serviceId: string) => {
+    try {
+      const { error } = await supabase.from('services').delete().eq('id', serviceId)
+      if (error) {
+        // Fallback: soft-delete / archive if past appointments reference this service_id
+        const { error: archiveErr } = await supabase
+          .from('services')
+          .update({ is_active: false })
+          .eq('id', serviceId)
+        if (archiveErr) {
+          setStatusBanner({
+            type: 'error',
+            message: `Failed to delete service: ${archiveErr.message || error.message}`
+          })
+          alert(`Failed to delete service: ${archiveErr.message || error.message}`)
+          return
+        }
+      }
+      setMyServices(prev => prev.filter(s => s.id !== serviceId))
+      setAdminServices(prev => prev.filter(s => s.id !== serviceId))
+      setConfirmDeleteServiceId(null)
+      await fetchMyServices()
+    } catch (err: any) {
+      console.error('Failed to delete service:', err)
+      setStatusBanner({
+        type: 'error',
+        message: `Failed to delete service: ${err?.message || 'Database error'}`
+      })
+      alert(`Failed to delete service: ${err?.message || 'Database error'}`)
+    }
   }
   const handleSaveEdit = async (serviceId: string) => {
     try { await supabase.from('services').update({ name: editForm.name, duration_minutes: parseInt(editForm.duration), price: parseFloat(editForm.price) }).eq('id', serviceId); setEditingServiceId(null); fetchMyServices() } catch (err) { console.error(err) }
@@ -2653,6 +2704,7 @@ export default function AdminDashboard() {
             return (
               <button
                 key={appt.id}
+                data-appt-card="true"
                 onTouchStart={(e) => handleTouchStart(e, appt)}
                 onTouchMove={handleTouchMove}
                 onTouchEnd={handleTouchEnd}
@@ -2704,6 +2756,7 @@ export default function AdminDashboard() {
           return (
             <button
               key={appt.id}
+              data-appt-card="true"
               onTouchStart={(e) => handleTouchStart(e, appt)}
               onTouchMove={handleTouchMove}
               onTouchEnd={handleTouchEnd}
@@ -3949,7 +4002,41 @@ export default function AdminDashboard() {
     const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
 
     return (
-      <div className="h-[100dvh] w-full bg-[var(--color-brand-900)] text-[var(--color-brand-light)] font-sans flex flex-col overflow-hidden relative">
+      <div
+        onTouchStart={(e) => {
+          if (e.touches.length !== 1) {
+            calendarSwipeStartRef.current = null
+            return
+          }
+          const startedOnAppt = Boolean((e.target as HTMLElement | null)?.closest?.('[data-appt-card]'))
+          calendarSwipeStartRef.current = {
+            x: e.touches[0].clientX,
+            y: e.touches[0].clientY,
+            startedOnAppt,
+          }
+        }}
+        onTouchEnd={(e) => {
+          const start = calendarSwipeStartRef.current
+          calendarSwipeStartRef.current = null
+          if (!start || e.changedTouches.length === 0) return
+
+          const dx = e.changedTouches[0].clientX - start.x
+          const dy = e.changedTouches[0].clientY - start.y
+
+          // Strict Gesture Guards (CRITICAL)
+          if (start.startedOnAppt) return
+          if (isDragActiveRef.current || touchDraggedAppt) return
+          if (Math.abs(dx) < 65) return
+          if (Math.abs(dx) <= Math.abs(dy) * 1.4) return
+
+          if (dx < 0) {
+            stepCalendarPeriod(1)
+          } else if (dx > 0) {
+            stepCalendarPeriod(-1)
+          }
+        }}
+        className="h-[100dvh] w-full bg-[var(--color-brand-900)] text-[var(--color-brand-light)] font-sans flex flex-col overflow-hidden relative"
+      >
         {/* Touch / Mouse Drag Floating Preview (Visually Detached Chip Following Finger / Cursor) */}
         {touchPos && touchDraggedAppt && isTouchDragging && (() => {
           const durationMins = toMinutes(touchDraggedAppt.end_time) - toMinutes(touchDraggedAppt.start_time)
@@ -4407,6 +4494,7 @@ export default function AdminDashboard() {
                             return (
                               <div
                                 key={appt.id}
+                                data-appt-card="true"
                                 className={`text-[10px] truncate px-1.5 py-0.5 rounded border font-medium flex items-center gap-1 ${chipBg} ${isRedListed ? '!border-red-500 ring-1 ring-red-500/60' : ''}`}
                               >
                                 <span className={`${isBlockout ? (isLight ? 'text-slate-600' : 'text-zinc-400') : 'text-[var(--color-brand-accent)]'} font-bold text-[9px] flex-shrink-0`}>
@@ -4708,11 +4796,11 @@ export default function AdminDashboard() {
             </form>
 
             <div className="space-y-3">
-              {myServices.length === 0 ? (
+              {myServices.filter(s => s.is_active !== false).length === 0 ? (
                  <div className="text-center py-8 text-[var(--color-brand-muted)] border border-dashed border-[var(--color-brand-700)] rounded-xl">No services found. Add your first service above.</div>
               ) : (
-                myServices.map(service => (
-                  <div key={service.id} className={`card-violet-gold p-4 rounded-xl transition-all ${service.is_active ? '' : 'opacity-50'}`}>
+                myServices.filter(s => s.is_active !== false).map(service => (
+                  <div key={service.id} className="card-violet-gold p-4 rounded-xl transition-all">
 
                     {editingServiceId === service.id ? (
                       <div className="flex flex-col sm:flex-row items-center gap-3">
@@ -4731,7 +4819,7 @@ export default function AdminDashboard() {
                     ) : (
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-4">
-                          <div className={`p-3 rounded-full border ${service.is_active ? 'bg-[var(--color-brand-900)] border-[#D4AF37]/60 text-[var(--color-brand-gold)]' : 'bg-red-900/20 border-red-500/40 text-red-500'}`}>
+                          <div className="p-3 rounded-full border bg-[var(--color-brand-900)] border-[#D4AF37]/60 text-[var(--color-brand-gold)]">
                             <Scissors className="w-5 h-5" />
                           </div>
                           <div>
@@ -4741,6 +4829,7 @@ export default function AdminDashboard() {
                         </div>
                         <div className="flex items-center gap-2">
                           <button
+                            type="button"
                             onClick={() => {
                               setEditForm({ name: service.name, duration: service.duration_minutes.toString(), price: service.price.toString() })
                               setEditingServiceId(service.id)
@@ -4750,10 +4839,22 @@ export default function AdminDashboard() {
                             <Edit className="w-4 h-4" />
                           </button>
                           <button
-                            onClick={() => handleToggleService(service.id, service.is_active)}
-                            className={`p-3 rounded-lg flex items-center gap-2 text-sm font-bold transition-all cursor-pointer ${service.is_active ? 'bg-[var(--color-brand-800)] hover:bg-red-900/20 hover:text-red-400' : 'bg-green-900/20 text-green-400 hover:bg-green-900/40'}`}
+                            type="button"
+                            onClick={() => {
+                              if (confirmDeleteServiceId === service.id) {
+                                handleDeleteService(service.id)
+                              } else {
+                                setConfirmDeleteServiceId(service.id)
+                              }
+                            }}
+                            className={`p-3 rounded-lg flex items-center gap-2 text-sm font-bold border transition-all cursor-pointer ${
+                              confirmDeleteServiceId === service.id
+                                ? 'bg-red-600 text-white border-red-500 shadow-md'
+                                : 'bg-[var(--color-brand-800)] border-[var(--color-brand-700)] hover:bg-red-900/20 hover:border-red-500/60 hover:text-red-400'
+                            }`}
                           >
-                            {service.is_active ? <><PowerOff className="w-4 h-4"/> Disable</> : <><Power className="w-4 h-4"/> Enable</>}
+                            <Trash2 className="w-4 h-4" />
+                            <span>{confirmDeleteServiceId === service.id ? 'Confirm?' : 'Delete'}</span>
                           </button>
                         </div>
                       </div>
