@@ -268,7 +268,7 @@ export default function AdminDashboard() {
   const [isBlockoutMode, setIsBlockoutMode] = useState(false)
   const [isRepeatingBlockout, setIsRepeatingBlockout] = useState(false)
   const [blockEndTime, setBlockEndTime] = useState('')
-  const [bookService, setBookService] = useState<any>(null)
+  const [bookServices, setBookServices] = useState<any[]>([])
   const [bookDate, setBookDate] = useState(selectedDate)
   const [bookTime, setBookTime] = useState('')
   const [bookSlots, setBookSlots] = useState<string[]>([])
@@ -279,6 +279,9 @@ export default function AdminDashboard() {
   const [clientPhone, setClientPhone] = useState('')
   const [bookNotes, setBookNotes] = useState('')
   const [isBooking, setIsBooking] = useState(false)
+
+  const bookTotalDurationMinutes = bookServices.reduce((sum, s) => sum + (Number(s?.duration_minutes) || 0), 0)
+  const bookTotalPrice = bookServices.reduce((sum, s) => sum + (Number(s?.price) || 0), 0)
 
   // Barber Working Hours (Settings) Modal State
   const [showBarberSettingsModal, setShowBarberSettingsModal] = useState(false)
@@ -296,11 +299,18 @@ export default function AdminDashboard() {
   const [blockEnd, setBlockEnd] = useState('')
   const [isSavingOverride, setIsSavingOverride] = useState(false)
 
-  // Appointment Details Modal
+  // Appointment Details & Edit Modal State
   const [showApptModal, setShowApptModal] = useState(false)
   const [selectedAppt, setSelectedAppt] = useState<any>(null)
   const [clientNotes, setClientNotes] = useState('')
   const [isUpdatingAppt, setIsUpdatingAppt] = useState(false)
+  const [editApptMode, setEditApptMode] = useState(false)
+  const [editApptDate, setEditApptDate] = useState('')
+  const [editApptTime, setEditApptTime] = useState('')
+  const [editApptServices, setEditApptServices] = useState<any[]>([])
+  const [editApptNotes, setEditApptNotes] = useState('')
+  const [editApptRegularSlots, setEditApptRegularSlots] = useState<string[]>([])
+  const [editApptAllSlots, setEditApptAllSlots] = useState<string[]>([])
 
   // Express Walk-In State
   const [walkInBarberId, setWalkInBarberId] = useState<string>('any')
@@ -536,38 +546,38 @@ export default function AdminDashboard() {
     return !hasWorkingRow
   }
 
-  // Helper to check if a proposed booking slot falls on a scheduled day off or outside the barber's active shift hours
-  const isOutsideBarberSchedule = (dateStr: string, startTime24: string, durationMinutes: number): boolean => {
-    if (!dateStr || !startTime24) return false
+  // Helper to get active working shift start & end minutes for a barber on a given YYYY-MM-DD date (returns null on non-working days)
+  const getBarberShiftMins = (barberId: string, dateStr: string): { startMins: number; endMins: number } | null => {
+    if (!barberId || !dateStr) return null
 
-    const activeOverride =
-      bookDateOverride && bookDateOverride.override_date === dateStr
-        ? bookDateOverride
-        : dayViewOverride && dayViewOverride.override_date === dateStr
-        ? dayViewOverride
-        : null
+    const allKnownOverrides = [
+      ...(bookDateOverride && bookDateOverride.override_date === dateStr ? [bookDateOverride] : []),
+      ...(dayViewOverride && dayViewOverride.override_date === dateStr ? [dayViewOverride] : []),
+      ...weekOverrides,
+      ...monthOverrides,
+    ]
 
-    const overridesForCheck = activeOverride ? [activeOverride] : (dayViewOverride ? [dayViewOverride] : [])
-    if (isNonWorkingDate(dateStr, overridesForCheck)) {
-      return true
+    if (isNonWorkingDate(dateStr, allKnownOverrides)) {
+      return null
     }
 
+    const matchingOverride = allKnownOverrides.find((o: any) => o && o.override_date === dateStr)
     const dayOfWeek = new Date(dateStr + 'T12:00:00Z').getUTCDay()
     const dayName = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][dayOfWeek]
-    const selectedBarber = barbers.find(b => b.id === selectedBarberId)
+    const targetBarber = barbers.find(b => b.id === barberId) || barbers.find(b => b.id === selectedBarberId)
 
     let shiftStartStr: string | null = null
     let shiftEndStr: string | null = null
 
-    if (activeOverride && !activeOverride.is_off && activeOverride.start_time && activeOverride.end_time) {
-      shiftStartStr = activeOverride.start_time
-      shiftEndStr = activeOverride.end_time
-    } else if (selectedBarber?.working_hours?.[dayName]) {
-      const whDay = selectedBarber.working_hours[dayName]
+    if (matchingOverride && !matchingOverride.is_off && matchingOverride.start_time && matchingOverride.end_time) {
+      shiftStartStr = matchingOverride.start_time
+      shiftEndStr = matchingOverride.end_time
+    } else if (targetBarber?.working_hours?.[dayName]) {
+      const whDay = targetBarber.working_hours[dayName]
       shiftStartStr = whDay.start || whDay.start_time || null
       shiftEndStr = whDay.end || whDay.end_time || null
-    } else if (selectedBarber?.working_hours) {
-      const parsedDay = getBarberDaySchedule(selectedBarber.working_hours, dayOfWeek)
+    } else if (targetBarber?.working_hours) {
+      const parsedDay = getBarberDaySchedule(targetBarber.working_hours, dayOfWeek)
       if (parsedDay) {
         shiftStartStr = parsedDay.start_time
         shiftEndStr = parsedDay.end_time
@@ -582,22 +592,33 @@ export default function AdminDashboard() {
       }
     }
 
-    if (!shiftStartStr || !shiftEndStr) return false
+    if (!shiftStartStr || !shiftEndStr) return null
 
-    const shiftStartMins = toMinutes(shiftStartStr)
-    const shiftEndMins = toMinutes(shiftEndStr)
+    const startMins = toMinutes(shiftStartStr)
+    const endMins = toMinutes(shiftEndStr)
+    if (endMins <= startMins) return null
+
+    return { startMins, endMins }
+  }
+
+  // Helper to check if a proposed booking slot falls on a scheduled day off or outside the barber's active shift hours
+  const isOutsideBarberSchedule = (dateStr: string, startTime24: string, durationMinutes: number): boolean => {
+    if (!dateStr || !startTime24) return false
+
+    const shift = getBarberShiftMins(selectedBarberId, dateStr)
+    if (!shift) {
+      return true
+    }
+
     const startMins = toMinutes(startTime24)
     const endMins = startMins + (Number(durationMinutes) || 30)
 
-    return startMins < shiftStartMins || endMins > shiftEndMins
+    return startMins < shift.startMins || endMins > shift.endMins
   }
 
   // Gate helper: checks if target date/time is outside working hours before opening Manual Book modal
   const requestOpenBookingModal = (targetDate: string, targetTime = '', overridesHint?: any[]) => {
-    const defaultSvc = bookService || (adminServices.length > 0 ? adminServices[0] : null)
-    if (!bookService && defaultSvc) {
-      setBookService(defaultSvc)
-    }
+    setBookServices([])
     setIsRepeatingBlockout(false)
     if (targetTime) {
       setBlockEndTime(minutesToTime(toMinutes(targetTime) + 60))
@@ -610,7 +631,7 @@ export default function AdminDashboard() {
     ]
     const isDayNonWorking = isNonWorkingDate(targetDate, effectiveOverrides)
     const isSlotOutOfHours = targetTime
-      ? isOutsideBarberSchedule(targetDate, targetTime, Number(defaultSvc?.duration_minutes) || 30)
+      ? isOutsideBarberSchedule(targetDate, targetTime, 30)
       : false
 
     if (isDayNonWorking || isSlotOutOfHours) {
@@ -780,7 +801,7 @@ export default function AdminDashboard() {
 
       const [apptRes, overrideRes] = await Promise.all([
         supabase.from('appointments').select('id, barber_id, client_id, service_id, appointment_date, start_time, end_time, status, notes, is_blockout, clients ( id, name, phone, notes, is_red_listed, red_listed_by, red_listed_reason, no_show_count ), services ( id, name, duration_minutes, price )').eq('barber_id', selectedBarberId).gte('appointment_date', startOfWeek).lte('appointment_date', endOfWeek).neq('status', 'cancelled').order('start_time', { ascending: true }),
-        supabase.from('schedule_overrides').select('override_date, is_off').eq('barber_id', selectedBarberId).gte('override_date', startOfWeek).lte('override_date', endOfWeek)
+        supabase.from('schedule_overrides').select('override_date, is_off, start_time, end_time').eq('barber_id', selectedBarberId).gte('override_date', startOfWeek).lte('override_date', endOfWeek)
       ])
       setWeekAppointments(apptRes.data || [])
       setWeekOverrides(overrideRes.data || [])
@@ -958,8 +979,8 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     let cancelled = false
-    if (showBookModal && selectedBarberId && bookService && bookDate) {
-      const serviceDuration = Number(bookService.duration_minutes) || 30
+    if (showBookModal && selectedBarberId && bookDate) {
+      const serviceDuration = bookServices.length > 0 ? Math.max(15, bookTotalDurationMinutes) : 30
 
       Promise.all([
         getAvailableSlots(selectedBarberId, bookDate, serviceDuration),
@@ -1022,7 +1043,7 @@ export default function AdminDashboard() {
             const nearest = collisionFree.find((s) => s >= target)
             return nearest || collisionFree[0]
           }
-          return ''
+          return prev || ''
         })
       })
     } else {
@@ -1030,7 +1051,72 @@ export default function AdminDashboard() {
       setAllCollisionFreeSlots([])
     }
     return () => { cancelled = true }
-  }, [showBookModal, selectedBarberId, bookService, bookDate, isBlockoutMode])
+  }, [showBookModal, selectedBarberId, bookServices, bookTotalDurationMinutes, bookDate, isBlockoutMode])
+
+  // Load available slots for Edit Appointment Mode (ignoring the edited appointment's own current overlap)
+  useEffect(() => {
+    let cancelled = false
+    if (showApptModal && editApptMode && selectedAppt && editApptDate && editApptServices.length > 0) {
+      const targetBarberId = selectedAppt.barber_id || selectedBarberId
+      const editDuration = Math.max(
+        15,
+        editApptServices.reduce((sum, s) => sum + (Number(s?.duration_minutes) || 0), 0)
+      )
+
+      Promise.all([
+        getAvailableSlots(targetBarberId, editApptDate, editDuration),
+        supabase
+          .from('appointments')
+          .select('id, start_time, end_time, status, is_blockout')
+          .eq('barber_id', targetBarberId)
+          .eq('appointment_date', editApptDate)
+          .neq('status', 'cancelled')
+      ]).then(([baseRegularSlots, apptsRes]) => {
+        if (cancelled) return
+
+        // Exclude selectedAppt itself from blocked intervals so its own time slots stay selectable
+        const otherIntervals = (apptsRes.data || [])
+          .filter(a => a.status !== 'cancelled' && String(a.id) !== String(selectedAppt.id))
+          .map(a => ({
+            start: toMinutes(a.start_time),
+            end: toMinutes(a.end_time)
+          }))
+
+        const shift = getBarberShiftMins(targetBarberId, editApptDate)
+        const collisionFree: string[] = []
+        const regularWithSelfUnblocked: string[] = [...baseRegularSlots]
+
+        for (let m = 0; m + editDuration <= 24 * 60; m += 15) {
+          const slotStr = minutesToTime(m)
+          const slotEnd = m + editDuration
+          const overlapsOther = otherIntervals.some(b => m < b.end && slotEnd > b.start)
+          if (!overlapsOther) {
+            collisionFree.push(slotStr)
+            if (shift && m >= shift.startMins && slotEnd <= shift.endMins && !regularWithSelfUnblocked.includes(slotStr)) {
+              regularWithSelfUnblocked.push(slotStr)
+            }
+          }
+        }
+
+        regularWithSelfUnblocked.sort()
+        setEditApptRegularSlots(regularWithSelfUnblocked)
+        setEditApptAllSlots(collisionFree)
+
+        setEditApptTime(prev => {
+          if (prev && (regularWithSelfUnblocked.includes(prev) || collisionFree.includes(prev))) {
+            return prev
+          }
+          if (regularWithSelfUnblocked.length > 0) return regularWithSelfUnblocked[0]
+          if (collisionFree.length > 0) return collisionFree[0]
+          return prev
+        })
+      })
+    } else {
+      setEditApptRegularSlots([])
+      setEditApptAllSlots([])
+    }
+    return () => { cancelled = true }
+  }, [showApptModal, editApptMode, selectedAppt, editApptDate, editApptServices, selectedBarberId])
 
   useEffect(() => {
     if (showManageDayModal && selectedBarberId && selectedDate) {
@@ -1069,7 +1155,7 @@ export default function AdminDashboard() {
     if (isBlockoutMode) {
       if (!bookDate || !bookTime || !blockEndTime) return
     } else {
-      if (!clientName || !clientPhone || !bookTime || !bookService) return
+      if (!clientName || !clientPhone || !bookTime || bookServices.length === 0) return
     }
     setIsBooking(true)
     try {
@@ -1088,7 +1174,7 @@ export default function AdminDashboard() {
         }
         endTimeStr = `${Math.floor(proposedEndTime / 60).toString().padStart(2, '0')}:${(proposedEndTime % 60).toString().padStart(2, '0')}:00`
       } else {
-        const duration = Number(bookService.duration_minutes) || 0
+        const duration = Math.max(15, bookTotalDurationMinutes)
         proposedStartTime = toMinutes(bookTime)
         proposedEndTime = proposedStartTime + duration
         endTimeStr = `${Math.floor(proposedEndTime / 60).toString().padStart(2, '0')}:${(proposedEndTime % 60).toString().padStart(2, '0')}:00`
@@ -1222,8 +1308,8 @@ export default function AdminDashboard() {
             is_blockout: true,
             barber_seen_at: nowIso
           }
-          if (bookService?.id) {
-            rowPayload.service_id = bookService.id
+          if (bookServices[0]?.id) {
+            rowPayload.service_id = bookServices[0].id
           }
           rowsToInsert.push(rowPayload)
         }
@@ -1238,6 +1324,14 @@ export default function AdminDashboard() {
           message: `Blocked time across ${rowsToInsert.length} working day${rowsToInsert.length === 1 ? '' : 's'} (next 8 weeks).`
         })
       } else {
+        const combinedNames = bookServices.map(s => s.name).join(' + ')
+        const trimmedRawNotes = bookNotes.trim()
+        const formattedApptNotes = isBlockoutMode
+          ? (trimmedRawNotes || 'Blocked Time')
+          : bookServices.length > 1
+          ? `[Services: ${combinedNames} ($${bookTotalPrice})]${trimmedRawNotes ? ` - ${trimmedRawNotes}` : ''}`
+          : (trimmedRawNotes || null)
+
         const insertPayload: any = {
           barber_id: selectedBarberId,
           client_id: clientId,
@@ -1245,14 +1339,12 @@ export default function AdminDashboard() {
           start_time: startTimeFormatted,
           end_time: endTimeStr,
           status: isBlockoutMode ? 'blocked' : 'booked',
-          notes: bookNotes.trim() || (isBlockoutMode ? 'Blocked Time' : null),
+          notes: formattedApptNotes,
           is_blockout: isBlockoutMode,
           barber_seen_at: nowIso
         }
-        if (!isBlockoutMode && bookService?.id) {
-          insertPayload.service_id = bookService.id
-        } else if (bookService?.id) {
-          insertPayload.service_id = bookService.id
+        if (bookServices[0]?.id) {
+          insertPayload.service_id = bookServices[0].id
         }
 
         const { error: apptErr } = await supabase.from('appointments').insert(insertPayload)
@@ -1265,12 +1357,13 @@ export default function AdminDashboard() {
           const assignedBarber = barbers.find(b => b.id === selectedBarberId)
           const barberName = assignedBarber?.name || loggedInBarber?.name || 'LifeStyle Barber'
           const friendlyDate = new Date(bookDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+          const combinedServiceNames = bookServices.map(s => s.name).join(' + ')
 
           // 1. Notify Client
           await supabase.functions.invoke('twilio-sms', {
             body: {
               to: clientPhone,
-              message: `LifeStyle Barber: Your appointment with ${barberName} for ${bookService.name} is confirmed for ${friendlyDate} at ${formatTime(bookTime)}. Reply CANCEL to cancel. Reply STOP to unsubscribe.`
+              message: `LifeStyle Barber: Your appointment with ${barberName} for ${combinedServiceNames} is confirmed for ${friendlyDate} at ${formatTime(bookTime)}. Reply CANCEL to cancel. Reply STOP to unsubscribe.`
             }
           })
 
@@ -1280,7 +1373,7 @@ export default function AdminDashboard() {
             await supabase.functions.invoke('twilio-sms', {
               body: {
                 to: barberPhone,
-                message: `LifeStyle Barber: New booking with ${clientName} (${clientPhone}) for ${bookService.name} on ${friendlyDate} at ${formatTime(bookTime)}.`
+                message: `LifeStyle Barber: New booking with ${clientName} (${clientPhone}) for ${combinedServiceNames} on ${friendlyDate} at ${formatTime(bookTime)}.`
               }
             })
           }
@@ -1292,7 +1385,7 @@ export default function AdminDashboard() {
       setShowBookModal(false)
       setIsBlockoutMode(false)
       setIsRepeatingBlockout(false)
-      setBookService(null)
+      setBookServices([])
       setBookTime('')
       setBlockEndTime('')
       setClientName('')
@@ -1578,6 +1671,7 @@ export default function AdminDashboard() {
 
   const handleOpenAppt = async (appt: any) => {
     setSelectedAppt(appt)
+    setEditApptMode(false)
     setClientNotes(appt.clients?.notes || '')
     setShowApptModal(true)
     const targetClientId = appt?.clients?.id || appt?.client_id
@@ -1605,6 +1699,111 @@ export default function AdminDashboard() {
         clients: clientRes.data || prev.clients,
         services: serviceRes.data || prev.services
       } : prev)
+    }
+  }
+
+  const handleStartEditAppt = () => {
+    if (!selectedAppt) return
+    setEditApptDate(selectedAppt.appointment_date || selectedDate)
+    setEditApptTime((selectedAppt.start_time || '').slice(0, 5))
+
+    const rawNotes = selectedAppt.notes || ''
+    const multiMatch = rawNotes.match(/^\[Services:\s*(.+?)\s*\(\$[\d.]+\)\](?:\s*-\s*|\s*)(.*)$/s)
+    if (multiMatch) {
+      const parsedNames = multiMatch[1].split(/\s*\+\s*/).map((n: string) => n.trim()).filter(Boolean)
+      const matchedSvcs = parsedNames
+        .map((name: string) => adminServices.find(s => s.name.toLowerCase() === name.toLowerCase()))
+        .filter(Boolean)
+      if (matchedSvcs.length > 0) {
+        setEditApptServices(matchedSvcs)
+      } else if (selectedAppt.services) {
+        setEditApptServices([selectedAppt.services])
+      } else if (adminServices.length > 0) {
+        setEditApptServices([adminServices[0]])
+      }
+      setEditApptNotes(multiMatch[2] || '')
+    } else {
+      if (selectedAppt.services) {
+        setEditApptServices([selectedAppt.services])
+      } else if (selectedAppt.service_id) {
+        const foundSvc = adminServices.find(s => s.id === selectedAppt.service_id)
+        setEditApptServices(foundSvc ? [foundSvc] : (adminServices.length > 0 ? [adminServices[0]] : []))
+      } else if (adminServices.length > 0) {
+        setEditApptServices([adminServices[0]])
+      }
+      setEditApptNotes(rawNotes)
+    }
+    setEditApptMode(true)
+  }
+
+  const handleSaveEditedAppointment = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!selectedAppt?.id || !editApptDate || !editApptTime || editApptServices.length === 0) return
+    setIsUpdatingAppt(true)
+    try {
+      const combinedDuration = Math.max(
+        15,
+        editApptServices.reduce((sum, s) => sum + (Number(s?.duration_minutes) || 0), 0)
+      )
+      const combinedPrice = editApptServices.reduce((sum, s) => sum + (Number(s?.price) || 0), 0)
+      const combinedNames = editApptServices.map(s => s.name).join(' + ')
+
+      const startMins = toMinutes(editApptTime)
+      const endMins = startMins + combinedDuration
+      const newStartStr = `${editApptTime.slice(0, 5)}:00`
+      const newEndStr = `${Math.floor(endMins / 60).toString().padStart(2, '0')}:${(endMins % 60).toString().padStart(2, '0')}:00`
+
+      const targetBarberId = selectedAppt.barber_id || selectedBarberId
+      const { data: conflicts, error: conflictErr } = await supabase
+        .from('appointments')
+        .select('id, clients ( name ), start_time, end_time, is_blockout')
+        .eq('barber_id', targetBarberId)
+        .eq('appointment_date', editApptDate)
+        .neq('status', 'cancelled')
+      if (conflictErr) throw conflictErr
+
+      if (conflicts) {
+        const conflict = conflicts.find((c: any) => {
+          if (String(c.id) === String(selectedAppt.id)) return false
+          const cStart = toMinutes(c.start_time)
+          const cEnd = toMinutes(c.end_time)
+          return startMins < cEnd && endMins > cStart
+        })
+        if (conflict) {
+          const conflictName = (conflict as any).is_blockout ? 'Blocked Time' : (conflict as any).clients?.name || 'Walk-In'
+          alert(`Not enough time! Slot overlaps with existing booking (${conflictName} at ${formatTime(conflict.start_time)}).`)
+          setIsUpdatingAppt(false)
+          return
+        }
+      }
+
+      const trimmedEditNotes = editApptNotes.trim()
+      const updatedNotes = editApptServices.length > 1
+        ? `[Services: ${combinedNames} ($${combinedPrice})]${trimmedEditNotes ? ` - ${trimmedEditNotes}` : ''}`
+        : (trimmedEditNotes || null)
+
+      const { error: updateErr } = await supabase
+        .from('appointments')
+        .update({
+          appointment_date: editApptDate,
+          start_time: newStartStr,
+          end_time: newEndStr,
+          service_id: editApptServices[0]?.id || null,
+          notes: updatedNotes
+        })
+        .eq('id', selectedAppt.id)
+
+      if (updateErr) throw updateErr
+
+      setEditApptMode(false)
+      setShowApptModal(false)
+      setSelectedAppt(null)
+      setRefreshTrigger(prev => prev + 1)
+    } catch (err: any) {
+      console.error('Failed to update appointment:', err)
+      alert(`Failed to update appointment: ${err?.message || 'Database error'}`)
+    } finally {
+      setIsUpdatingAppt(false)
     }
   }
 
@@ -2763,6 +2962,14 @@ export default function AdminDashboard() {
     const currentMins = now.getHours() * 60 + now.getMinutes()
     const isWithinHours = currentMins >= CALENDAR_START_HOUR * 60 && currentMins <= CALENDAR_END_HOUR * 60
     const currentTop = ((currentMins - CALENDAR_START_HOUR * 60) / 60) * PIXELS_PER_HOUR
+    const shift = !isOff ? getBarberShiftMins(selectedBarberId, gridDate) : null
+
+    const offHoursShadeStyle = {
+      backgroundColor: isLight ? 'rgba(23, 15, 46, 0.08)' : 'rgba(4, 2, 8, 0.5)',
+      backgroundImage: isLight
+        ? 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(23, 15, 46, 0.06) 10px, rgba(23, 15, 46, 0.06) 20px)'
+        : 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(4, 2, 8, 0.42) 10px, rgba(4, 2, 8, 0.42) 20px)'
+    }
 
     return (
       <div
@@ -2779,6 +2986,28 @@ export default function AdminDashboard() {
           backgroundRepeat: 'repeat-y',
         }}
       >
+        {/* Out-of-Hours Shading on Working Days (Before Shift & After Shift) */}
+        {shift && shift.startMins > 0 && (
+          <div
+            className="absolute left-0 w-full bg-[var(--color-brand-900)]/50 opacity-50 pointer-events-none z-0 border-b border-[var(--color-brand-700)]/50"
+            style={{
+              top: 0,
+              height: `${shift.startMins * (PIXELS_PER_HOUR / 60)}px`,
+              ...offHoursShadeStyle,
+            }}
+          />
+        )}
+        {shift && shift.endMins < 24 * 60 && (
+          <div
+            className="absolute left-0 w-full bg-[var(--color-brand-900)]/50 opacity-50 pointer-events-none z-0 border-t border-[var(--color-brand-700)]/50"
+            style={{
+              top: `${shift.endMins * (PIXELS_PER_HOUR / 60)}px`,
+              bottom: 0,
+              ...offHoursShadeStyle,
+            }}
+          />
+        )}
+
         {/* Subtle non-working day shaded diagonal-stripe backdrop (slots remain clickable for extra shifts) */}
         {isOff && (
           <div
@@ -3054,7 +3283,11 @@ export default function AdminDashboard() {
                     </p>
                   )}
                   <h2 className="text-xl font-bold">
-                    {selectedAppt.is_blockout ? (selectedAppt.notes || 'Blocked Time') : selectedAppt.clients?.name || 'Walk-In'}
+                    {editApptMode
+                      ? 'Edit Appointment'
+                      : selectedAppt.is_blockout
+                      ? (selectedAppt.notes || 'Blocked Time')
+                      : selectedAppt.clients?.name || 'Walk-In'}
                   </h2>
                   <div className="flex items-center gap-2 mt-0.5">
                     <p className="text-sm text-[var(--color-brand-accent)] font-semibold">
@@ -3067,9 +3300,176 @@ export default function AdminDashboard() {
                     )}
                   </div>
                 </div>
-                <button onClick={() => setShowApptModal(false)} className="text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer"><X className="w-6 h-6" /></button>
+                <button
+                  onClick={() => {
+                    setEditApptMode(false)
+                    setShowApptModal(false)
+                  }}
+                  className="text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer"
+                >
+                  <X className="w-6 h-6" />
+                </button>
               </div>
 
+              {editApptMode ? (
+                <form onSubmit={handleSaveEditedAppointment} className="p-6 space-y-4 overflow-y-auto flex-1">
+                  {/* Date Picker */}
+                  <div>
+                    <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">
+                      Date
+                    </label>
+                    <input
+                      type="date"
+                      required
+                      value={editApptDate}
+                      onChange={(e) => setEditApptDate(e.target.value)}
+                      className={`w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none ${isLight ? '[color-scheme:light]' : '[color-scheme:dark]'} cursor-pointer text-[var(--color-brand-light)]`}
+                    />
+                  </div>
+
+                  {/* Multi-Service Selector */}
+                  <div className="space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider">
+                        Selected Services
+                      </label>
+                      {editApptServices.length > 0 && (
+                        <span className="text-xs font-bold text-[var(--color-brand-gold)]">
+                          {editApptServices.length} {editApptServices.length === 1 ? 'Service' : 'Services'} •{' '}
+                          {editApptServices.reduce((sum, s) => sum + (Number(s?.duration_minutes) || 0), 0)}m • $
+                          {editApptServices.reduce((sum, s) => sum + (Number(s?.price) || 0), 0)}
+                        </span>
+                      )}
+                    </div>
+
+                    {editApptServices.length > 0 && (
+                      <div className="space-y-1.5">
+                        {editApptServices.map((svc, idx) => (
+                          <div
+                            key={`${svc.id}-${idx}`}
+                            className="flex items-center justify-between gap-2 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] px-3 py-2 rounded-xl"
+                          >
+                            <div className="min-w-0">
+                              <p className="text-sm font-bold text-[var(--color-brand-light)] truncate">{svc.name}</p>
+                              <p className="text-xs text-[var(--color-brand-muted)]">
+                                {svc.duration_minutes}m • <span className="text-[var(--color-brand-gold)] font-semibold">${svc.price}</span>
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setEditApptServices(prev => prev.filter((_, i) => i !== idx))}
+                              className="p-1.5 rounded-lg text-[var(--color-brand-muted)] hover:text-red-400 hover:bg-red-500/15 transition-colors cursor-pointer flex-shrink-0"
+                              aria-label={`Remove ${svc.name}`}
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <select
+                      value=""
+                      onChange={(e) => {
+                        const chosen = adminServices.find(s => s.id === e.target.value)
+                        if (chosen) {
+                          setEditApptServices(prev => [...prev, chosen])
+                        }
+                      }}
+                      className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer text-[var(--color-brand-light)]"
+                    >
+                      <option value="" disabled>Add a service...</option>
+                      {adminServices.map(s => (
+                        <option key={s.id} value={s.id}>
+                          + {s.name} ({s.duration_minutes}m • ${s.price})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Start Time Dropdown (ignoring this appointment's own overlap) */}
+                  <div>
+                    <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">
+                      Start Time
+                    </label>
+                    {(() => {
+                      const outsideEditSlots = editApptAllSlots.filter(t => !editApptRegularSlots.includes(t))
+                      const validEditSlots = editApptRegularSlots.length > 0
+                        ? [...editApptRegularSlots, ...outsideEditSlots]
+                        : editApptAllSlots
+                      return (
+                        <select
+                          required
+                          value={validEditSlots.includes(editApptTime) ? editApptTime : ''}
+                          onChange={(e) => setEditApptTime(e.target.value)}
+                          disabled={editApptServices.length === 0 || validEditSlots.length === 0}
+                          className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer disabled:opacity-50 text-[var(--color-brand-light)]"
+                        >
+                          <option value="" disabled>
+                            {editApptServices.length === 0
+                              ? 'Add a service first'
+                              : validEditSlots.length === 0
+                              ? 'No open slots on this date'
+                              : 'Select time...'}
+                          </option>
+                          {editApptRegularSlots.length > 0 ? (
+                            <>
+                              <optgroup label="Regular Scheduled Hours">
+                                {editApptRegularSlots.map(time => (
+                                  <option key={time} value={time}>{formatTime(time)}</option>
+                                ))}
+                              </optgroup>
+                              {outsideEditSlots.length > 0 && (
+                                <optgroup label="Outside Scheduled Hours (Squeeze-In / Exception)">
+                                  {outsideEditSlots.map(time => (
+                                    <option key={time} value={time}>{formatTime(time)}</option>
+                                  ))}
+                                </optgroup>
+                              )}
+                            </>
+                          ) : (
+                            editApptAllSlots.map(time => (
+                              <option key={time} value={time}>{formatTime(time)}</option>
+                            ))
+                          )}
+                        </select>
+                      )
+                    })()}
+                  </div>
+
+                  {/* Appointment Notes */}
+                  <div>
+                    <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">
+                      Appointment Notes (Optional)
+                    </label>
+                    <textarea
+                      value={editApptNotes}
+                      onChange={(e) => setEditApptNotes(e.target.value)}
+                      rows={2}
+                      placeholder="Appointment notes..."
+                      className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 text-sm text-[var(--color-brand-light)] outline-none focus:border-[var(--color-brand-accent)] resize-none"
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-3 pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setEditApptMode(false)}
+                      disabled={isUpdatingAppt}
+                      className="flex-1 py-3 rounded-xl border border-[var(--color-brand-700)] text-sm font-bold text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] hover:bg-[var(--color-brand-900)]/60 transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      Cancel Edit
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isUpdatingAppt || !editApptDate || !editApptTime || editApptServices.length === 0}
+                      className="flex-1 py-3 rounded-xl bg-[var(--color-brand-accent)] hover:brightness-110 text-white text-sm font-bold transition-all cursor-pointer disabled:opacity-50 shadow-md"
+                    >
+                      {isUpdatingAppt ? 'Saving...' : 'Save Changes'}
+                    </button>
+                  </div>
+                </form>
+              ) : (
               <div className="p-6 space-y-5 overflow-y-auto flex-1">
                  {/* Red List Warning Alert & Fee Recovery Controls */}
                  {!selectedAppt.is_blockout && selectedAppt.clients?.is_red_listed && (() => {
@@ -3187,7 +3587,18 @@ export default function AdminDashboard() {
                    <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-3">
                      {selectedAppt.is_blockout ? 'Manage Blockout' : 'Update Status'}
                    </label>
-                   <div className={selectedAppt.is_blockout ? 'grid grid-cols-1 gap-2' : 'grid grid-cols-2 gap-2'}>
+                   <div className={selectedAppt.is_blockout ? 'grid grid-cols-1 gap-2' : 'grid grid-cols-3 gap-2'}>
+                     {!selectedAppt.is_blockout && (
+                       <button
+                         type="button"
+                         onClick={handleStartEditAppt}
+                         disabled={isUpdatingAppt}
+                         className="flex flex-col items-center justify-center gap-1 py-4 rounded-xl border border-[var(--color-brand-periwinkle)]/60 bg-[var(--color-brand-periwinkle)]/15 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all cursor-pointer disabled:opacity-50"
+                       >
+                         <Edit className="w-5 h-5" />
+                         <span className="text-xs font-bold">Edit</span>
+                       </button>
+                     )}
                      {!selectedAppt.is_blockout && (
                        <button onClick={handleNoShow} disabled={isUpdatingAppt} className="flex flex-col items-center justify-center gap-1 py-4 rounded-xl border border-[var(--color-brand-700)] hover:bg-red-900/20 hover:border-red-500 hover:text-red-400 transition-colors cursor-pointer disabled:opacity-50">
                          <UserX className="w-5 h-5" />
@@ -3216,6 +3627,7 @@ export default function AdminDashboard() {
                  </div>
 
               </div>
+              )}
            </div>
         </div>
       )}
@@ -3263,9 +3675,6 @@ export default function AdminDashboard() {
                     if (targetTime) {
                       setBlockEndTime(minutesToTime(toMinutes(targetTime) + 60))
                     }
-                    if (!bookService && adminServices.length > 0) {
-                      setBookService(adminServices[0])
-                    }
                     setOutOfHoursPrompt(null)
                     setShowBookModal(true)
                   }}
@@ -3282,14 +3691,15 @@ export default function AdminDashboard() {
       {/* MANUAL BOOK & BLOCK TIME MODAL */}
       {showBookModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
-           <div className="bg-[var(--color-brand-800)] w-full max-w-md rounded-2xl flex flex-col border border-[var(--color-brand-700)] shadow-2xl overflow-hidden">
-              <div className="flex items-center justify-between p-6 border-b border-[var(--color-brand-700)]">
+           <div className="bg-[var(--color-brand-800)] w-full max-w-md rounded-2xl flex flex-col border border-[var(--color-brand-700)] shadow-2xl overflow-hidden max-h-[90vh]">
+              <div className="flex items-center justify-between p-6 border-b border-[var(--color-brand-700)] flex-shrink-0">
                 <h2 className="text-xl font-bold">{isBlockoutMode ? 'Block Time' : 'Manual Book'}</h2>
                 <button
                   onClick={() => {
                     setShowBookModal(false)
                     setIsBlockoutMode(false)
                     setIsRepeatingBlockout(false)
+                    setBookServices([])
                     setBookTime('')
                     setBlockEndTime('')
                     setBookNotes('')
@@ -3303,7 +3713,7 @@ export default function AdminDashboard() {
               </div>
 
               {/* Mode Tabs: Book Client vs Block Time */}
-              <div className="flex bg-[var(--color-brand-900)] p-1 rounded-xl mx-6 mt-4 border border-[var(--color-brand-700)]">
+              <div className="flex bg-[var(--color-brand-900)] p-1 rounded-xl mx-6 mt-4 border border-[var(--color-brand-700)] flex-shrink-0">
                 <button
                   type="button"
                   onClick={() => setIsBlockoutMode(false)}
@@ -3333,7 +3743,7 @@ export default function AdminDashboard() {
                 </button>
               </div>
 
-              <form onSubmit={handleAdminBooking} className="p-6 space-y-4">
+              <form onSubmit={handleAdminBooking} className="p-6 space-y-4 overflow-y-auto flex-1">
                  {/* DATE FIELD - ALWAYS SHOWN */}
                  <div>
                    <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">Date</label>
@@ -3362,17 +3772,63 @@ export default function AdminDashboard() {
 
                  {!isBlockoutMode ? (
                    <>
-                     {/* SERVICE SELECT */}
-                     <div>
-                       <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">Service</label>
+                     {/* MULTI-SERVICE SELECTOR */}
+                     <div className="space-y-2.5">
+                       <div className="flex items-center justify-between">
+                         <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider">
+                           {bookServices.length > 0 ? 'Selected Services' : 'Service'}
+                         </label>
+                         {bookServices.length > 0 && (
+                           <span className="text-xs font-bold text-[var(--color-brand-gold)]">
+                             {bookServices.length} {bookServices.length === 1 ? 'Service' : 'Services'} • {bookTotalDurationMinutes}m • ${bookTotalPrice}
+                           </span>
+                         )}
+                       </div>
+
+                       {bookServices.length > 0 && (
+                         <div className="space-y-1.5">
+                           {bookServices.map((svc, idx) => (
+                             <div
+                               key={`${svc.id}-${idx}`}
+                               className="flex items-center justify-between gap-2 bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] px-3 py-2 rounded-xl"
+                             >
+                               <div className="min-w-0">
+                                 <p className="text-sm font-bold text-[var(--color-brand-light)] truncate">{svc.name}</p>
+                                 <p className="text-xs text-[var(--color-brand-muted)]">
+                                   {svc.duration_minutes}m • <span className="text-[var(--color-brand-gold)] font-semibold">${svc.price}</span>
+                                 </p>
+                               </div>
+                               <button
+                                 type="button"
+                                 onClick={() => setBookServices(prev => prev.filter((_, i) => i !== idx))}
+                                 className="p-1.5 rounded-lg text-[var(--color-brand-muted)] hover:text-red-400 hover:bg-red-500/15 transition-colors cursor-pointer flex-shrink-0"
+                                 aria-label={`Remove ${svc.name}`}
+                               >
+                                 <X className="w-4 h-4" />
+                               </button>
+                             </div>
+                           ))}
+                         </div>
+                       )}
+
                        <select
-                         required
-                         value={bookService?.id || ''}
-                         onChange={(e) => setBookService(adminServices.find(s => s.id === e.target.value))}
+                         value=""
+                         onChange={(e) => {
+                           const chosen = adminServices.find(s => s.id === e.target.value)
+                           if (chosen) {
+                             setBookServices(prev => [...prev, chosen])
+                           }
+                         }}
                          className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer text-[var(--color-brand-light)]"
                        >
-                         <option value="" disabled>Select service...</option>
-                         {adminServices.map(s => <option key={s.id} value={s.id}>{s.name} ({s.duration_minutes}m)</option>)}
+                         <option value="" disabled>
+                           {bookServices.length === 0 ? 'Select a service...' : 'Add another service...'}
+                         </option>
+                         {adminServices.map(s => (
+                           <option key={s.id} value={s.id}>
+                             {bookServices.length === 0 ? `${s.name} (${s.duration_minutes}m • $${s.price})` : `+ ${s.name} (${s.duration_minutes}m • $${s.price})`}
+                           </option>
+                         ))}
                        </select>
                      </div>
 
@@ -3388,13 +3844,11 @@ export default function AdminDashboard() {
                                required
                                value={combinedValidSlots.includes(bookTime) ? bookTime : ''}
                                onChange={(e) => setBookTime(e.target.value)}
-                               disabled={!bookService || combinedValidSlots.length === 0}
+                               disabled={combinedValidSlots.length === 0}
                                className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer disabled:opacity-50 text-[var(--color-brand-light)]"
                              >
                                <option value="" disabled>
-                                 {!bookService
-                                   ? 'Select service first'
-                                   : combinedValidSlots.length === 0
+                                 {combinedValidSlots.length === 0
                                    ? 'No open slots on this date'
                                    : 'Select time...'}
                                </option>
@@ -3419,9 +3873,9 @@ export default function AdminDashboard() {
                                  ))
                                )}
                              </select>
-                             {bookService && combinedValidSlots.length === 0 && (
+                             {bookServices.length > 0 && combinedValidSlots.length === 0 && (
                                <p className="text-xs text-red-500 font-semibold mt-1.5">
-                                 No collision-free {bookService.duration_minutes}m slots left on {formatDisplayDate(bookDate)}.
+                                 No collision-free {bookTotalDurationMinutes}m slots left on {formatDisplayDate(bookDate)}.
                                </p>
                              )}
                            </>
@@ -3491,7 +3945,7 @@ export default function AdminDashboard() {
                        return (
                          <button
                            type="submit"
-                           disabled={isBooking || !bookTime || !combinedValidSlots.includes(bookTime) || !bookService || !clientName || !clientPhone}
+                           disabled={isBooking || !bookTime || !combinedValidSlots.includes(bookTime) || bookServices.length === 0 || !clientName || !clientPhone}
                            className="w-full bg-[var(--color-brand-accent)] text-white font-bold p-3 rounded-xl mt-4 cursor-pointer disabled:opacity-50 hover:not-disabled:brightness-110 transition-all"
                          >
                            {isBooking ? 'Booking...' : 'Confirm Appointment'}
