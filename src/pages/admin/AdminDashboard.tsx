@@ -274,7 +274,7 @@ export default function AdminDashboard() {
   const [bookSlots, setBookSlots] = useState<string[]>([])
   const [allCollisionFreeSlots, setAllCollisionFreeSlots] = useState<string[]>([])
   const [bookDateOverride, setBookDateOverride] = useState<any | null>(null)
-  const [confirmOutOfHours, setConfirmOutOfHours] = useState(false)
+  const [outOfHoursPrompt, setOutOfHoursPrompt] = useState<{ date: string; time: string; isBlockout?: boolean } | null>(null)
   const [clientName, setClientName] = useState('')
   const [clientPhone, setClientPhone] = useState('')
   const [bookNotes, setBookNotes] = useState('')
@@ -590,6 +590,37 @@ export default function AdminDashboard() {
     const endMins = startMins + (Number(durationMinutes) || 30)
 
     return startMins < shiftStartMins || endMins > shiftEndMins
+  }
+
+  // Gate helper: checks if target date/time is outside working hours before opening Manual Book modal
+  const requestOpenBookingModal = (targetDate: string, targetTime = '', overridesHint?: any[]) => {
+    const defaultSvc = bookService || (adminServices.length > 0 ? adminServices[0] : null)
+    if (!bookService && defaultSvc) {
+      setBookService(defaultSvc)
+    }
+    setIsRepeatingBlockout(false)
+    if (targetTime) {
+      setBlockEndTime(minutesToTime(toMinutes(targetTime) + 60))
+    }
+
+    const effectiveOverrides = overridesHint || [
+      ...(dayViewOverride ? [dayViewOverride] : []),
+      ...weekOverrides,
+      ...monthOverrides,
+    ]
+    const isDayNonWorking = isNonWorkingDate(targetDate, effectiveOverrides)
+    const isSlotOutOfHours = targetTime
+      ? isOutsideBarberSchedule(targetDate, targetTime, Number(defaultSvc?.duration_minutes) || 30)
+      : false
+
+    if (isDayNonWorking || isSlotOutOfHours) {
+      setOutOfHoursPrompt({ date: targetDate, time: targetTime, isBlockout: false })
+      return
+    }
+
+    setBookDate(targetDate)
+    setBookTime(targetTime)
+    setShowBookModal(true)
   }
 
   useEffect(() => {
@@ -925,11 +956,6 @@ export default function AdminDashboard() {
     }
   }, [session, activeModule, refreshTrigger])
 
-  // Reset out-of-hours confirmation whenever booking fields or modal state change
-  useEffect(() => {
-    setConfirmOutOfHours(false)
-  }, [bookDate, bookTime, bookService?.id, selectedBarberId, showBookModal])
-
   useEffect(() => {
     let cancelled = false
     if (showBookModal && selectedBarberId && bookService && bookDate) {
@@ -1044,11 +1070,6 @@ export default function AdminDashboard() {
       if (!bookDate || !bookTime || !blockEndTime) return
     } else {
       if (!clientName || !clientPhone || !bookTime || !bookService) return
-      const svcDuration = Number(bookService.duration_minutes) || 30
-      if (isOutsideBarberSchedule(bookDate, bookTime, svcDuration) && !confirmOutOfHours) {
-        setConfirmOutOfHours(true)
-        return
-      }
     }
     setIsBooking(true)
     try {
@@ -2785,12 +2806,11 @@ export default function AdminDashboard() {
               data-time={timeStr}
               onClick={() => {
                 if (touchDraggedAppt || justDraggedRef.current) return
-                setBookDate(gridDate)
-                setBookTime(timeStr)
-                setBlockEndTime(minutesToTime(toMinutes(timeStr) + 60))
-                setIsRepeatingBlockout(false)
-                if (!bookService && adminServices.length > 0) setBookService(adminServices[0])
-                setShowBookModal(true)
+                requestOpenBookingModal(
+                  gridDate,
+                  timeStr,
+                  isOff ? [{ override_date: gridDate, is_off: true }] : undefined
+                )
               }}
               title={isSlotHovered ? `Drop to reschedule to ${formatTime(timeStr)}` : `Book ${formatTime(timeStr)}`}
               className={`absolute left-0 w-full m-0 p-0 border-0 outline-none transition-colors z-10 ${
@@ -3200,6 +3220,65 @@ export default function AdminDashboard() {
         </div>
       )}
 
+      {/* UPFRONT OUTSIDE WORKING HOURS CONFIRMATION GATE MODAL */}
+      {outOfHoursPrompt && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
+          <div className="bg-[var(--color-brand-800)] w-full max-w-md rounded-2xl flex flex-col border border-[var(--color-brand-700)] shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between p-5 sm:p-6 border-b border-[var(--color-brand-700)]">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-full bg-[var(--color-brand-900)] border border-[#D4AF37]/60">
+                  <Clock className="w-5 h-5 text-[var(--color-brand-gold)]" />
+                </div>
+                <h2 className="text-lg sm:text-xl font-bold text-[var(--color-brand-light)]">Outside Working Hours</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOutOfHoursPrompt(null)}
+                className="text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+
+            <div className="p-5 sm:p-6 space-y-5">
+              <p className="text-sm sm:text-base text-[var(--color-brand-light)] leading-relaxed">
+                Hey, just so you know, this is outside of your working hours. You can still book a chunk of time as usual and the rest of the day around it will remain blocked off as a non-working day.
+              </p>
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setOutOfHoursPrompt(null)}
+                  className="px-4 py-2.5 rounded-xl border border-[var(--color-brand-700)] text-sm font-bold text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] hover:bg-[var(--color-brand-900)]/60 transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const targetDate = outOfHoursPrompt.date
+                    const targetTime = outOfHoursPrompt.time
+                    setBookDate(targetDate)
+                    setBookTime(targetTime)
+                    if (targetTime) {
+                      setBlockEndTime(minutesToTime(toMinutes(targetTime) + 60))
+                    }
+                    if (!bookService && adminServices.length > 0) {
+                      setBookService(adminServices[0])
+                    }
+                    setOutOfHoursPrompt(null)
+                    setShowBookModal(true)
+                  }}
+                  className="px-6 py-2.5 rounded-xl bg-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle-hover)] text-white text-sm font-bold transition-all cursor-pointer shadow-md"
+                >
+                  Okay
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* MANUAL BOOK & BLOCK TIME MODAL */}
       {showBookModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
@@ -3262,7 +3341,21 @@ export default function AdminDashboard() {
                      type="date"
                      required
                      value={bookDate}
-                     onChange={(e) => setBookDate(e.target.value)}
+                     onChange={(e) => {
+                       const nextDate = e.target.value
+                       if (!nextDate) return
+                       const effectiveOverrides = [
+                         ...(dayViewOverride ? [dayViewOverride] : []),
+                         ...weekOverrides,
+                         ...monthOverrides,
+                       ]
+                       if (!isBlockoutMode && isNonWorkingDate(nextDate, effectiveOverrides)) {
+                         setShowBookModal(false)
+                         setOutOfHoursPrompt({ date: nextDate, time: bookTime, isBlockout: false })
+                         return
+                       }
+                       setBookDate(nextDate)
+                     }}
                      className={`w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none ${isLight ? '[color-scheme:light]' : '[color-scheme:dark]'} cursor-pointer text-[var(--color-brand-light)]`}
                    />
                  </div>
@@ -3315,14 +3408,14 @@ export default function AdminDashboard() {
                                    {outsideSlots.length > 0 && (
                                      <optgroup label="Outside Scheduled Hours (Squeeze-In / Exception)">
                                        {outsideSlots.map(time => (
-                                         <option key={time} value={time}>{formatTime(time)} (Exception)</option>
+                                         <option key={time} value={time}>{formatTime(time)}</option>
                                        ))}
                                      </optgroup>
                                    )}
                                  </>
                                ) : (
                                  allCollisionFreeSlots.map(time => (
-                                   <option key={time} value={time}>{formatTime(time)} (Scheduled Day Off / Exception)</option>
+                                   <option key={time} value={time}>{formatTime(time)}</option>
                                  ))
                                )}
                              </select>
@@ -3391,50 +3484,18 @@ export default function AdminDashboard() {
                      </div>
 
                      {(() => {
-                       const activeBarberObj = barbers.find(b => b.id === selectedBarberId)
-                       const isExceptionSlot = Boolean(
-                         bookDate &&
-                         bookTime &&
-                         bookService &&
-                         isOutsideBarberSchedule(bookDate, bookTime, Number(bookService.duration_minutes) || 30)
-                       )
                        const combinedValidSlots = bookSlots.length > 0
                          ? [...bookSlots, ...allCollisionFreeSlots.filter(t => !bookSlots.includes(t))]
                          : allCollisionFreeSlots
 
                        return (
-                         <>
-                           {isExceptionSlot && (
-                             <div
-                               className={`rounded-xl p-3.5 text-xs font-bold border-2 flex items-start gap-2.5 shadow-md mt-2 ${
-                                 isLight
-                                   ? 'bg-amber-100/90 border-amber-600 text-amber-950'
-                                   : 'bg-amber-950/80 border-amber-500/80 text-amber-100'
-                               }`}
-                             >
-                               <AlertTriangle className={`w-4 h-4 flex-shrink-0 mt-0.5 ${isLight ? 'text-amber-700' : 'text-[var(--color-brand-gold)]'}`} />
-                               <span className="leading-snug">
-                                 ⚠️ Outside Scheduled Hours: This appointment is outside {activeBarberObj?.name || 'the barber'}'s scheduled working hours (the rest of the day will remain closed to public bookings). Would you like to proceed?
-                               </span>
-                             </div>
-                           )}
-
-                           <button
-                             type="submit"
-                             disabled={isBooking || !bookTime || !combinedValidSlots.includes(bookTime) || !bookService || !clientName || !clientPhone}
-                             className={`w-full font-bold p-3 rounded-xl mt-4 cursor-pointer disabled:opacity-50 transition-all ${
-                               isExceptionSlot && confirmOutOfHours
-                                 ? 'bg-amber-600 hover:bg-amber-500 text-white ring-2 ring-[#D4AF37] shadow-lg'
-                                 : 'bg-[var(--color-brand-accent)] text-white hover:not-disabled:brightness-110'
-                             }`}
-                           >
-                             {isBooking
-                               ? 'Booking...'
-                               : isExceptionSlot && confirmOutOfHours
-                               ? 'Yes, Proceed & Book Exception'
-                               : 'Confirm Appointment'}
-                           </button>
-                         </>
+                         <button
+                           type="submit"
+                           disabled={isBooking || !bookTime || !combinedValidSlots.includes(bookTime) || !bookService || !clientName || !clientPhone}
+                           className="w-full bg-[var(--color-brand-accent)] text-white font-bold p-3 rounded-xl mt-4 cursor-pointer disabled:opacity-50 hover:not-disabled:brightness-110 transition-all"
+                         >
+                           {isBooking ? 'Booking...' : 'Confirm Appointment'}
+                         </button>
                        )
                      })()}
                    </>
@@ -4408,11 +4469,7 @@ export default function AdminDashboard() {
               </button>
               <button
                 onClick={() => {
-                  setBookDate(selectedDate)
-                  setBookTime('')
-                  setIsRepeatingBlockout(false)
-                  if (!bookService && adminServices.length > 0) setBookService(adminServices[0])
-                  setShowBookModal(true)
+                  requestOpenBookingModal(selectedDate, '')
                 }}
                 className="flex items-center gap-1 bg-[var(--color-brand-accent)] text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:brightness-110 transition-all cursor-pointer shadow-sm"
               >
