@@ -63,6 +63,9 @@ export default function BarberCalendar() {
 
     const [selectedServices, setSelectedServices] = useState<Service[]>([])
     const [isAddingMoreServices, setIsAddingMoreServices] = useState(false)
+    const [lineupPulse, setLineupPulse] = useState(false)
+    const lineupCardRef = useRef<HTMLDivElement | null>(null)
+    const lineupPulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const [selectedDate, setSelectedDate] = useState(() => getLocalTodayStr())
 
     const totalDurationMinutes = selectedServices.reduce((sum, s) => sum + s.duration_minutes, 0)
@@ -502,7 +505,12 @@ export default function BarberCalendar() {
             {isServiceSelectionStep ? (
                 <div className="space-y-4 animate-in fade-in slide-in-from-right-4">
                     {selectedServices.length > 0 && (
-                        <div className="card-violet-gold backdrop-blur-md p-5 rounded-2xl space-y-3.5 border border-[#D4AF37]/60 shadow-lg">
+                        <div
+                            ref={lineupCardRef}
+                            className={`card-violet-gold backdrop-blur-md p-5 rounded-2xl space-y-3.5 border border-[#D4AF37]/60 shadow-lg transition-all duration-300 ${
+                                lineupPulse ? 'ring-2 ring-[var(--color-brand-gold)] scale-[1.01]' : ''
+                            }`}
+                        >
                             <div className="flex items-center justify-between">
                                 <span className="text-xs font-bold uppercase tracking-wider text-[var(--color-brand-gold)] flex items-center gap-1.5">
                                     <Scissors className="w-3.5 h-3.5" /> Your Service Lineup
@@ -568,6 +576,14 @@ export default function BarberCalendar() {
                                 setSelectedServices(prev => [...prev, service])
                                 setIsAddingMoreServices(true)
                                 setSelectedTimeGroup(null)
+                                window.scrollTo({ top: 0, behavior: 'smooth' })
+                                if (lineupPulseTimerRef.current) {
+                                    clearTimeout(lineupPulseTimerRef.current)
+                                }
+                                setLineupPulse(true)
+                                lineupPulseTimerRef.current = setTimeout(() => {
+                                    setLineupPulse(false)
+                                }, 500)
                             }}
                             className="w-full card-violet-gold transition-all p-6 rounded-2xl flex items-center justify-between group cursor-pointer backdrop-blur-md"
                         >

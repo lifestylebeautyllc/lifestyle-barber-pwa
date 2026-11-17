@@ -260,6 +260,8 @@ export default function AdminDashboard() {
   const dayScrollContainerRef = useRef<HTMLDivElement | null>(null)
   const weekScrollContainerRef = useRef<HTMLDivElement | null>(null)
   const calendarSwipeStartRef = useRef<{ x: number; y: number; startedOnAppt: boolean } | null>(null)
+  const [calendarSwipeAnim, setCalendarSwipeAnim] = useState<'left' | 'right' | null>(null)
+  const calendarSwipeAnimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // --- MODALS STATE ---
   const [showBookModal, setShowBookModal] = useState(false)
@@ -737,6 +739,14 @@ export default function AdminDashboard() {
   }
 
   const stepCalendarPeriod = (direction: -1 | 1) => {
+    if (calendarSwipeAnimTimerRef.current) {
+      clearTimeout(calendarSwipeAnimTimerRef.current)
+    }
+    setCalendarSwipeAnim(direction === 1 ? 'left' : 'right')
+    calendarSwipeAnimTimerRef.current = setTimeout(() => {
+      setCalendarSwipeAnim(null)
+    }, 180)
+
     if (viewMode === 'month') {
       if (direction === -1) handlePrevMonth()
       else handleNextMonth()
@@ -2732,7 +2742,7 @@ export default function AdminDashboard() {
                   if (touchDraggedAppt || isTouchDragging || justDraggedRef.current || isDragActiveRef.current) return
                   handleOpenAppt(appt)
                 }}
-                className={`absolute left-px right-px m-0 box-border rounded-sm p-0.5 sm:p-1 overflow-hidden border shadow-sm flex flex-col text-left z-20 cursor-grab active:cursor-grabbing hover:brightness-125 transition-all select-none ${
+                className={`absolute left-px right-px m-0 box-border rounded-sm p-1 overflow-hidden border shadow-sm flex flex-col text-left z-20 cursor-grab active:cursor-grabbing hover:brightness-125 transition-all select-none ${
                   isThisBeingDragged
                     ? 'scale-105 shadow-2xl ring-2 ring-[var(--color-brand-accent)] z-30 opacity-80 animate-pulse touch-none'
                     : 'touch-pan-y'
@@ -2754,7 +2764,7 @@ export default function AdminDashboard() {
                     ✂️ {serviceName}
                   </div>
                 )}
-                <div className="text-[9px] sm:text-[10px] font-bold leading-tight truncate overflow-hidden whitespace-nowrap w-full pointer-events-none">
+                <div className="text-[9px] sm:text-[10px] font-bold leading-snug break-words whitespace-normal w-full pointer-events-none">
                   {isRedListed ? '🚩 ' : ''}{isBlockout ? (appt.notes || 'Blocked') : isBlocked ? 'BLOCKED' : appt.clients?.name || 'Walk-In'}
                 </div>
                 {isRedListed && height >= 42 ? (
@@ -2784,7 +2794,7 @@ export default function AdminDashboard() {
                 if (touchDraggedAppt || isTouchDragging || justDraggedRef.current || isDragActiveRef.current) return
                 handleOpenAppt(appt)
               }}
-              className={`absolute left-1.5 right-1.5 m-0 box-border rounded-lg p-1.5 sm:p-2 overflow-hidden border shadow-md flex flex-col text-left z-20 cursor-grab active:cursor-grabbing hover:brightness-110 transition-all select-none ${
+              className={`absolute left-1.5 right-1.5 m-0 box-border rounded-lg ${height <= 64 ? 'py-1 px-2.5' : 'py-1.5 px-2.5 sm:p-2'} overflow-hidden border shadow-md flex flex-col text-left z-20 cursor-grab active:cursor-grabbing hover:brightness-110 transition-all select-none ${
                 isThisBeingDragged
                   ? 'scale-105 shadow-2xl ring-2 ring-[var(--color-brand-accent)] z-30 opacity-80 animate-pulse touch-none'
                   : 'touch-pan-y'
@@ -2795,25 +2805,40 @@ export default function AdminDashboard() {
                 touchAction: isThisBeingDragged ? 'none' : 'pan-y'
               }}
             >
-              {height <= 32 ? (
-                <div className="flex items-center justify-between gap-2 text-xs font-bold leading-none pointer-events-none my-auto">
-                  <span className="truncate flex items-center gap-1.5">
-                    {isBlockout ? <Ban className={`w-3 h-3 flex-shrink-0 ${isLight ? 'text-slate-600' : 'text-zinc-400'}`} /> : isBlocked && <Lock className={`w-3 h-3 flex-shrink-0 ${isLight ? 'text-orange-600' : 'text-orange-400'}`} />}
-                    {!isBlockout && !isBlocked && (
-                      <span className={`font-extrabold uppercase tracking-wide flex-shrink-0 ${
+              {height <= 64 ? (
+                <div className="pointer-events-none flex flex-col justify-center h-full min-w-0">
+                  <div className="flex items-center justify-between gap-1.5 leading-tight">
+                    {isBlockout ? (
+                      <span className={`text-[10px] font-bold uppercase tracking-wide flex items-center gap-1 truncate ${isLight ? 'text-slate-600' : 'text-zinc-400'}`}>
+                        <Ban className="w-3 h-3 flex-shrink-0" /> Blockout
+                      </span>
+                    ) : isBlocked ? (
+                      <span className={`text-[10px] font-bold uppercase tracking-wide flex items-center gap-1 truncate ${isLight ? 'text-orange-700' : 'text-orange-400'}`}>
+                        <Lock className="w-3 h-3 flex-shrink-0" /> Blocked Time
+                      </span>
+                    ) : (
+                      <span className={`text-[10px] sm:text-[11px] font-extrabold uppercase tracking-wide truncate ${
                         isCompleted ? (isLight ? 'text-emerald-800' : 'text-emerald-300') : isLight ? 'text-[var(--color-brand-periwinkle)]' : 'text-[var(--color-brand-gold)]'
                       }`}>
                         ✂️ {serviceName}
                       </span>
                     )}
-                    {isRedListed && <span className="bg-red-600 text-white text-[9px] font-extrabold px-1 rounded flex-shrink-0">🚩 RED LIST • OWES {redListedOwedBy}</span>}
-                    <span className="truncate text-sm font-bold">
+                    {isRedListed && (
+                      <span className="bg-red-600 text-white text-[9px] font-extrabold px-1 rounded flex-shrink-0">
+                        🚩 RED LIST • OWES {redListedOwedBy}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-baseline justify-between gap-2 mt-0.5 leading-tight">
+                    <span className={`font-bold text-sm leading-tight break-words whitespace-normal ${isBlockout ? (isLight ? 'text-slate-800' : 'text-zinc-200') : 'text-[var(--color-brand-light)]'}`}>
                       {isBlockout ? (appt.notes || 'Blocked Time') : isBlocked ? 'BLOCKED TIME' : appt.clients?.name || 'Walk-In'}
                     </span>
-                  </span>
-                  <span className="text-xs opacity-85 flex-shrink-0">
-                    {formatTime(appt.start_time)}
-                  </span>
+                    <span className={`text-[11px] font-semibold flex-shrink-0 ${
+                      isBlockout ? (isLight ? 'text-slate-600' : 'text-zinc-400') : isBlocked ? (isLight ? 'text-orange-700' : 'text-orange-400') : isCompleted ? (isLight ? 'text-emerald-700' : 'text-emerald-400') : 'text-[var(--color-brand-accent)]'
+                    }`}>
+                      {formatTime(appt.start_time)} - {formatTime(appt.end_time)}
+                    </span>
+                  </div>
                 </div>
               ) : (
                 <div className="pointer-events-none flex flex-col h-full">
@@ -2846,7 +2871,7 @@ export default function AdminDashboard() {
                       {appt.notes && !isBlockout && <FileText className="w-3.5 h-3.5 flex-shrink-0 opacity-80" />}
                     </span>
                   </div>
-                  <div className={`text-sm truncate font-bold mt-0.5 leading-snug ${isBlockout ? (isLight ? 'text-slate-800' : 'text-zinc-200') : 'text-[var(--color-brand-light)]'}`}>
+                  <div className={`font-bold text-sm mt-0.5 leading-tight break-words whitespace-normal ${isBlockout ? (isLight ? 'text-slate-800' : 'text-zinc-200') : 'text-[var(--color-brand-light)]'}`}>
                     {isBlockout ? (appt.notes || 'Blocked Time') : isBlocked ? 'BLOCKED TIME' : appt.clients?.name || 'Walk-In'}
                   </div>
                   <div className={`text-xs font-semibold truncate mt-0.5 ${
@@ -4088,11 +4113,11 @@ export default function AdminDashboard() {
                 )}
                 <div className="flex flex-col text-left min-w-0">
                   {!isBlockout && !isBlocked && (
-                    <span className="truncate max-w-[165px] text-[10px] font-extrabold uppercase tracking-wide text-[var(--color-brand-gold)]">
+                    <span className="truncate max-w-[200px] text-[10px] font-extrabold uppercase tracking-wide text-[var(--color-brand-gold)]">
                       ✂️ {touchDraggedAppt.services?.name || 'Service'}
                     </span>
                   )}
-                  <span className="truncate max-w-[160px] text-[var(--color-brand-light)] font-bold">
+                  <span className="break-words whitespace-normal leading-tight text-sm text-[var(--color-brand-light)] font-bold">
                     {isBlockout ? (touchDraggedAppt.notes || 'Blocked Time') : isBlocked ? 'BLOCKED TIME' : touchDraggedAppt.clients?.name || 'Walk-In'}
                   </span>
                   <span className={`text-[10px] font-semibold truncate ${isBlockout ? (isLight ? 'text-slate-600' : 'text-zinc-400') : 'text-[var(--color-brand-accent)]'}`}>
@@ -4315,7 +4340,13 @@ export default function AdminDashboard() {
                   dayScrollContainerRef.current = el
                   scrollContainerRef.current = el
                 }}
-                className="flex-1 w-full overflow-y-auto overflow-x-hidden relative flex flex-col"
+                className={`flex-1 w-full overflow-y-auto overflow-x-hidden relative flex flex-col transition-all duration-180 ease-out will-change-transform ${
+                  calendarSwipeAnim === 'left'
+                    ? 'translate-x-4 opacity-75'
+                    : calendarSwipeAnim === 'right'
+                    ? '-translate-x-4 opacity-75'
+                    : 'translate-x-0 opacity-100'
+                }`}
               >
                 {isDayNonWorking && (
                   <div className={`border-b px-4 py-1.5 text-xs font-semibold flex items-center justify-between z-30 flex-shrink-0 ${
@@ -4341,7 +4372,15 @@ export default function AdminDashboard() {
 
           {/* WEEK VIEW */}
           {viewMode === 'week' && (
-            <div className="flex-1 w-full flex flex-col overflow-hidden">
+            <div
+              className={`flex-1 w-full flex flex-col overflow-hidden transition-all duration-180 ease-out will-change-transform ${
+                calendarSwipeAnim === 'left'
+                  ? 'translate-x-4 opacity-75'
+                  : calendarSwipeAnim === 'right'
+                  ? '-translate-x-4 opacity-75'
+                  : 'translate-x-0 opacity-100'
+              }`}
+            >
               {/* Sticky Day Column Headers */}
               <div className="flex bg-[var(--color-brand-800)] border-b border-[var(--color-brand-700)] select-none flex-shrink-0 w-full">
                 <div className="w-12 sm:w-14 flex-shrink-0 border-r border-[var(--color-brand-700)] bg-[var(--color-brand-900)]" />
@@ -4403,7 +4442,7 @@ export default function AdminDashboard() {
                   weekScrollContainerRef.current = el
                   scrollContainerRef.current = el
                 }}
-                className="flex-1 w-full overflow-y-auto overflow-x-hidden relative flex"
+                className="flex-1 w-full overflow-y-auto overflow-x-auto relative flex"
               >
                 <div className="flex w-full flex-1 min-w-0">
                   {renderYAxis()}
@@ -4415,7 +4454,7 @@ export default function AdminDashboard() {
                       const dayAppts = weekAppointments.filter(a => a.appointment_date === dateStr)
                       const isOff = isNonWorkingDate(dateStr, weekOverrides)
                       return (
-                        <div key={dateStr} className="relative min-w-0 w-full">
+                        <div key={dateStr} className="relative min-w-0 sm:min-w-[145px] w-full">
                           {renderTimeGrid(dateStr, dayAppts, isOff, true)}
                         </div>
                       )
@@ -4428,7 +4467,15 @@ export default function AdminDashboard() {
 
           {/* MONTH VIEW */}
           {viewMode === 'month' && (
-            <div className="flex-1 w-full flex flex-col overflow-hidden">
+            <div
+              className={`flex-1 w-full flex flex-col overflow-hidden transition-all duration-180 ease-out will-change-transform ${
+                calendarSwipeAnim === 'left'
+                  ? 'translate-x-4 opacity-75'
+                  : calendarSwipeAnim === 'right'
+                  ? '-translate-x-4 opacity-75'
+                  : 'translate-x-0 opacity-100'
+              }`}
+            >
               {/* Day of Week Headers */}
               <div className="grid grid-cols-7 border-b border-[var(--color-brand-700)] bg-[var(--color-brand-800)] py-2 select-none flex-shrink-0">
                 {dayNamesShort.map(day => (
