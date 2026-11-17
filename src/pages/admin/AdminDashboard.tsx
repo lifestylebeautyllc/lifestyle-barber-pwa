@@ -272,6 +272,9 @@ export default function AdminDashboard() {
   const [bookDate, setBookDate] = useState(selectedDate)
   const [bookTime, setBookTime] = useState('')
   const [bookSlots, setBookSlots] = useState<string[]>([])
+  const [allCollisionFreeSlots, setAllCollisionFreeSlots] = useState<string[]>([])
+  const [bookDateOverride, setBookDateOverride] = useState<any | null>(null)
+  const [confirmOutOfHours, setConfirmOutOfHours] = useState(false)
   const [clientName, setClientName] = useState('')
   const [clientPhone, setClientPhone] = useState('')
   const [bookNotes, setBookNotes] = useState('')
@@ -531,6 +534,62 @@ export default function AdminDashboard() {
       (row: any) => Number(row.day_of_week) === dayOfWeek
     )
     return !hasWorkingRow
+  }
+
+  // Helper to check if a proposed booking slot falls on a scheduled day off or outside the barber's active shift hours
+  const isOutsideBarberSchedule = (dateStr: string, startTime24: string, durationMinutes: number): boolean => {
+    if (!dateStr || !startTime24) return false
+
+    const activeOverride =
+      bookDateOverride && bookDateOverride.override_date === dateStr
+        ? bookDateOverride
+        : dayViewOverride && dayViewOverride.override_date === dateStr
+        ? dayViewOverride
+        : null
+
+    const overridesForCheck = activeOverride ? [activeOverride] : (dayViewOverride ? [dayViewOverride] : [])
+    if (isNonWorkingDate(dateStr, overridesForCheck)) {
+      return true
+    }
+
+    const dayOfWeek = new Date(dateStr + 'T12:00:00Z').getUTCDay()
+    const dayName = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][dayOfWeek]
+    const selectedBarber = barbers.find(b => b.id === selectedBarberId)
+
+    let shiftStartStr: string | null = null
+    let shiftEndStr: string | null = null
+
+    if (activeOverride && !activeOverride.is_off && activeOverride.start_time && activeOverride.end_time) {
+      shiftStartStr = activeOverride.start_time
+      shiftEndStr = activeOverride.end_time
+    } else if (selectedBarber?.working_hours?.[dayName]) {
+      const whDay = selectedBarber.working_hours[dayName]
+      shiftStartStr = whDay.start || whDay.start_time || null
+      shiftEndStr = whDay.end || whDay.end_time || null
+    } else if (selectedBarber?.working_hours) {
+      const parsedDay = getBarberDaySchedule(selectedBarber.working_hours, dayOfWeek)
+      if (parsedDay) {
+        shiftStartStr = parsedDay.start_time
+        shiftEndStr = parsedDay.end_time
+      }
+    }
+
+    if (!shiftStartStr || !shiftEndStr) {
+      const wsRow = barberWeeklySchedules.find((row: any) => Number(row.day_of_week) === dayOfWeek)
+      if (wsRow) {
+        shiftStartStr = wsRow.start_time
+        shiftEndStr = wsRow.end_time
+      }
+    }
+
+    if (!shiftStartStr || !shiftEndStr) return false
+
+    const shiftStartMins = toMinutes(shiftStartStr)
+    const shiftEndMins = toMinutes(shiftEndStr)
+    const startMins = toMinutes(startTime24)
+    const endMins = startMins + (Number(durationMinutes) || 30)
+
+    return startMins < shiftStartMins || endMins > shiftEndMins
   }
 
   useEffect(() => {
@@ -866,26 +925,83 @@ export default function AdminDashboard() {
     }
   }, [session, activeModule, refreshTrigger])
 
+  // Reset out-of-hours confirmation whenever booking fields or modal state change
+  useEffect(() => {
+    setConfirmOutOfHours(false)
+  }, [bookDate, bookTime, bookService?.id, selectedBarberId, showBookModal])
+
   useEffect(() => {
     let cancelled = false
     if (showBookModal && selectedBarberId && bookService && bookDate) {
-      getAvailableSlots(selectedBarberId, bookDate, bookService.duration_minutes).then((slots) => {
+      const serviceDuration = Number(bookService.duration_minutes) || 30
+
+      Promise.all([
+        getAvailableSlots(selectedBarberId, bookDate, serviceDuration),
+        supabase
+          .from('appointments')
+          .select('start_time, end_time, status, is_blockout')
+          .eq('barber_id', selectedBarberId)
+          .eq('appointment_date', bookDate)
+          .neq('status', 'cancelled'),
+        supabase
+          .from('schedule_overrides')
+          .select('*')
+          .eq('barber_id', selectedBarberId)
+          .eq('override_date', bookDate)
+          .maybeSingle()
+      ]).then(([regularSlots, apptsRes, ovRes]) => {
         if (cancelled) return
-        setBookSlots(slots)
-        if (!isBlockoutMode) {
-          setBookTime((prev) => {
-            if (prev && slots.includes(prev)) return prev
-            if (slots.length === 0) return ''
-            if (prev) {
-              const nearest = slots.find((s) => s >= prev)
-              return nearest || slots[0]
+        setBookDateOverride(ovRes.data || null)
+        setBookSlots(regularSlots)
+
+        const blockedIntervals = (apptsRes.data || [])
+          .filter(a => a.status !== 'cancelled')
+          .map(a => ({
+            start: toMinutes(a.start_time),
+            end: toMinutes(a.end_time)
+          }))
+
+        const now = new Date()
+        const todayLocalStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+        const isTodayDate = bookDate === todayLocalStr
+        const nowMins = now.getHours() * 60 + now.getMinutes()
+
+        setBookTime((prev) => {
+          const collisionFree: string[] = []
+          for (let m = 0; m + serviceDuration <= 24 * 60; m += 15) {
+            const slotStr = minutesToTime(m)
+            if (isTodayDate && m < nowMins && slotStr !== prev) continue
+            const slotEnd = m + serviceDuration
+            const overlaps = blockedIntervals.some(b => m < b.end && slotEnd > b.start)
+            if (!overlaps) {
+              collisionFree.push(slotStr)
             }
-            return slots[0]
-          })
-        }
+          }
+
+          setAllCollisionFreeSlots(collisionFree)
+
+          if (isBlockoutMode) return prev
+          if (prev && (regularSlots.includes(prev) || collisionFree.includes(prev))) {
+            return prev
+          }
+          if (regularSlots.length > 0) {
+            if (prev) {
+              const nearestReg = regularSlots.find((s) => s >= prev)
+              return nearestReg || regularSlots[0]
+            }
+            return regularSlots[0]
+          }
+          if (collisionFree.length > 0) {
+            const target = prev || '09:00'
+            const nearest = collisionFree.find((s) => s >= target)
+            return nearest || collisionFree[0]
+          }
+          return ''
+        })
       })
     } else {
       setBookSlots([])
+      setAllCollisionFreeSlots([])
     }
     return () => { cancelled = true }
   }, [showBookModal, selectedBarberId, bookService, bookDate, isBlockoutMode])
@@ -928,6 +1044,11 @@ export default function AdminDashboard() {
       if (!bookDate || !bookTime || !blockEndTime) return
     } else {
       if (!clientName || !clientPhone || !bookTime || !bookService) return
+      const svcDuration = Number(bookService.duration_minutes) || 30
+      if (isOutsideBarberSchedule(bookDate, bookTime, svcDuration) && !confirmOutOfHours) {
+        setConfirmOutOfHours(true)
+        return
+      }
     }
     setIsBooking(true)
     try {
@@ -3162,24 +3283,57 @@ export default function AdminDashboard() {
                        </select>
                      </div>
 
-                     {/* START TIME SELECT (STRICT AVAILABLE-TIMES-ONLY) */}
+                     {/* START TIME SELECT (REGULAR OPEN SLOTS + SQUEEZE-IN / EXCEPTION SLOTS) */}
                      <div>
                        <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">Start Time</label>
-                       <select
-                         required
-                         value={bookSlots.includes(bookTime) ? bookTime : ''}
-                         onChange={(e) => setBookTime(e.target.value)}
-                         disabled={!bookService || bookSlots.length === 0}
-                         className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer disabled:opacity-50 text-[var(--color-brand-light)]"
-                       >
-                         <option value="" disabled>{!bookService ? 'Select service first' : bookSlots.length === 0 ? 'No open slots on this date' : 'Select available time...'}</option>
-                         {bookSlots.map(time => <option key={time} value={time}>{formatTime(time)}</option>)}
-                       </select>
-                       {bookService && bookSlots.length === 0 && (
-                         <p className="text-xs text-red-500 font-semibold mt-1.5">
-                           No open {bookService.duration_minutes}m slots left on {formatDisplayDate(bookDate)}.
-                         </p>
-                       )}
+                       {(() => {
+                         const outsideSlots = allCollisionFreeSlots.filter(t => !bookSlots.includes(t))
+                         const combinedValidSlots = bookSlots.length > 0 ? [...bookSlots, ...outsideSlots] : allCollisionFreeSlots
+                         return (
+                           <>
+                             <select
+                               required
+                               value={combinedValidSlots.includes(bookTime) ? bookTime : ''}
+                               onChange={(e) => setBookTime(e.target.value)}
+                               disabled={!bookService || combinedValidSlots.length === 0}
+                               className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer disabled:opacity-50 text-[var(--color-brand-light)]"
+                             >
+                               <option value="" disabled>
+                                 {!bookService
+                                   ? 'Select service first'
+                                   : combinedValidSlots.length === 0
+                                   ? 'No open slots on this date'
+                                   : 'Select time...'}
+                               </option>
+                               {bookSlots.length > 0 ? (
+                                 <>
+                                   <optgroup label="Regular Scheduled Hours">
+                                     {bookSlots.map(time => (
+                                       <option key={time} value={time}>{formatTime(time)}</option>
+                                     ))}
+                                   </optgroup>
+                                   {outsideSlots.length > 0 && (
+                                     <optgroup label="Outside Scheduled Hours (Squeeze-In / Exception)">
+                                       {outsideSlots.map(time => (
+                                         <option key={time} value={time}>{formatTime(time)} (Exception)</option>
+                                       ))}
+                                     </optgroup>
+                                   )}
+                                 </>
+                               ) : (
+                                 allCollisionFreeSlots.map(time => (
+                                   <option key={time} value={time}>{formatTime(time)} (Scheduled Day Off / Exception)</option>
+                                 ))
+                               )}
+                             </select>
+                             {bookService && combinedValidSlots.length === 0 && (
+                               <p className="text-xs text-red-500 font-semibold mt-1.5">
+                                 No collision-free {bookService.duration_minutes}m slots left on {formatDisplayDate(bookDate)}.
+                               </p>
+                             )}
+                           </>
+                         )
+                       })()}
                      </div>
 
                      <div className="space-y-3 pt-4 border-t border-[var(--color-brand-700)]">
@@ -3236,13 +3390,53 @@ export default function AdminDashboard() {
                         </div>
                      </div>
 
-                     <button
-                       type="submit"
-                       disabled={isBooking || !bookTime || !bookSlots.includes(bookTime) || !bookService || !clientName || !clientPhone}
-                       className="w-full bg-[var(--color-brand-accent)] text-white font-bold p-3 rounded-xl mt-4 cursor-pointer disabled:opacity-50 hover:not-disabled:brightness-110"
-                     >
-                       Confirm Appointment
-                     </button>
+                     {(() => {
+                       const activeBarberObj = barbers.find(b => b.id === selectedBarberId)
+                       const isExceptionSlot = Boolean(
+                         bookDate &&
+                         bookTime &&
+                         bookService &&
+                         isOutsideBarberSchedule(bookDate, bookTime, Number(bookService.duration_minutes) || 30)
+                       )
+                       const combinedValidSlots = bookSlots.length > 0
+                         ? [...bookSlots, ...allCollisionFreeSlots.filter(t => !bookSlots.includes(t))]
+                         : allCollisionFreeSlots
+
+                       return (
+                         <>
+                           {isExceptionSlot && (
+                             <div
+                               className={`rounded-xl p-3.5 text-xs font-bold border-2 flex items-start gap-2.5 shadow-md mt-2 ${
+                                 isLight
+                                   ? 'bg-amber-100/90 border-amber-600 text-amber-950'
+                                   : 'bg-amber-950/80 border-amber-500/80 text-amber-100'
+                               }`}
+                             >
+                               <AlertTriangle className={`w-4 h-4 flex-shrink-0 mt-0.5 ${isLight ? 'text-amber-700' : 'text-[var(--color-brand-gold)]'}`} />
+                               <span className="leading-snug">
+                                 ⚠️ Outside Scheduled Hours: This appointment is outside {activeBarberObj?.name || 'the barber'}'s scheduled working hours (the rest of the day will remain closed to public bookings). Would you like to proceed?
+                               </span>
+                             </div>
+                           )}
+
+                           <button
+                             type="submit"
+                             disabled={isBooking || !bookTime || !combinedValidSlots.includes(bookTime) || !bookService || !clientName || !clientPhone}
+                             className={`w-full font-bold p-3 rounded-xl mt-4 cursor-pointer disabled:opacity-50 transition-all ${
+                               isExceptionSlot && confirmOutOfHours
+                                 ? 'bg-amber-600 hover:bg-amber-500 text-white ring-2 ring-[#D4AF37] shadow-lg'
+                                 : 'bg-[var(--color-brand-accent)] text-white hover:not-disabled:brightness-110'
+                             }`}
+                           >
+                             {isBooking
+                               ? 'Booking...'
+                               : isExceptionSlot && confirmOutOfHours
+                               ? 'Yes, Proceed & Book Exception'
+                               : 'Confirm Appointment'}
+                           </button>
+                         </>
+                       )
+                     })()}
                    </>
                  ) : (
                    <>
