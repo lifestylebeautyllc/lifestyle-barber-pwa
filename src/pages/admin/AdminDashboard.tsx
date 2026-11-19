@@ -138,6 +138,7 @@ const PIXELS_PER_MINUTE = PIXELS_PER_HOUR / 60
 const TOTAL_HOURS = CALENDAR_END_HOUR - CALENDAR_START_HOUR
 const TOTAL_RAIL_HEIGHT = TOTAL_HOURS * PIXELS_PER_HOUR
 const SLOT_HEIGHT = PIXELS_PER_HOUR / 4 // 30px
+const ALL_DAY_15_MIN_SLOTS = Array.from({ length: 24 * 4 }, (_, i) => minutesToTime(i * 15))
 
 // Parses "HH:MM" or "HH:MM:SS" strictly — no padding, no rounding, no offsets.
 function parseTimeParts(timeStr: string): [number, number] {
@@ -275,6 +276,24 @@ export default function AdminDashboard() {
   const [allCollisionFreeSlots, setAllCollisionFreeSlots] = useState<string[]>([])
   const [bookDateOverride, setBookDateOverride] = useState<any | null>(null)
   const [outOfHoursPrompt, setOutOfHoursPrompt] = useState<{ date: string; time: string; isBlockout?: boolean } | null>(null)
+  const [conflictOverridePrompt, setConflictOverridePrompt] = useState<{
+    title: string
+    proposedSummary: string
+    reasons: string[]
+    onConfirm: () => void
+  } | null>(null)
+  const [smsConfirmPrompt, setSmsConfirmPrompt] = useState<{
+    contextTitle: 'New Booking Text' | 'Appointment Move / Reschedule Text'
+    changeSummary: string
+    clientName: string
+    clientPhone: string
+    appointmentId?: string | null
+    barberPhone?: string | null
+    barberMessage?: string | null
+  } | null>(null)
+  const [smsConfirmMessage, setSmsConfirmMessage] = useState('')
+  const [overrideQuietHoursSendNow, setOverrideQuietHoursSendNow] = useState(false)
+  const [isDispatchingConfirmSms, setIsDispatchingConfirmSms] = useState(false)
   const [clientName, setClientName] = useState('')
   const [clientPhone, setClientPhone] = useState('')
   const [bookNotes, setBookNotes] = useState('')
@@ -1034,7 +1053,7 @@ export default function AdminDashboard() {
           setAllCollisionFreeSlots(collisionFree)
 
           if (isBlockoutMode) return prev
-          if (prev && (regularSlots.includes(prev) || collisionFree.includes(prev))) {
+          if (prev && (regularSlots.includes(prev) || collisionFree.includes(prev) || ALL_DAY_15_MIN_SLOTS.includes(prev))) {
             return prev
           }
           if (regularSlots.length > 0) {
@@ -1049,7 +1068,7 @@ export default function AdminDashboard() {
             const nearest = collisionFree.find((s) => s >= target)
             return nearest || collisionFree[0]
           }
-          return prev || ''
+          return prev || '09:00'
         })
       })
     } else {
@@ -1109,12 +1128,12 @@ export default function AdminDashboard() {
         setEditApptAllSlots(collisionFree)
 
         setEditApptTime(prev => {
-          if (prev && (regularWithSelfUnblocked.includes(prev) || collisionFree.includes(prev))) {
+          if (prev && (regularWithSelfUnblocked.includes(prev) || collisionFree.includes(prev) || ALL_DAY_15_MIN_SLOTS.includes(prev))) {
             return prev
           }
           if (regularWithSelfUnblocked.length > 0) return regularWithSelfUnblocked[0]
           if (collisionFree.length > 0) return collisionFree[0]
-          return prev
+          return prev || '09:00'
         })
       })
     } else {
@@ -1155,9 +1174,154 @@ export default function AdminDashboard() {
     loadWalkInSlots()
   }, [activeModule, walkInBarberId, walkInService, selectedDate, barbers])
 
+  // Helper to compute the end-of-week Sunday cutoff (Mon-Sun week) for a given YYYY-MM-DD date
+  const getEndOfWeekSundayInfo = (dateStr: string) => {
+    const baseStr = dateStr || selectedDate
+    const startDt = new Date(baseStr + 'T12:00:00Z')
+    const daysUntilSunday = (7 - startDt.getUTCDay()) % 7
+    const endDt = new Date(startDt.getTime() + daysUntilSunday * 24 * 60 * 60 * 1000)
+    const endDateStr = endDt.toISOString().split('T')[0]
+    const formattedCutoff = endDt.toLocaleDateString('en-US', {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      timeZone: 'UTC',
+    })
+    return {
+      startDt,
+      daysUntilSunday,
+      totalDaysInRange: daysUntilSunday + 1,
+      endDt,
+      endDateStr,
+      formattedCutoff,
+    }
+  }
+
+  // Helper to check Pacific (America/Los_Angeles) Quiet Hours (9:00 PM - 7:00 AM) and compute the exact next 7:00 AM Pacific UTC ISO string
+  const getPacificQuietHoursInfo = (now: Date = new Date()) => {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    })
+    const parts = formatter.formatToParts(now)
+    const getPart = (type: string) => Number(parts.find(p => p.type === type)?.value || '0')
+
+    const laYear = getPart('year')
+    const laMonth = getPart('month')
+    const laDay = getPart('day')
+    const laHour = getPart('hour')
+
+    const isQuietHours = laHour >= 21 || laHour < 7
+    const next7AMLabel = laHour < 7 ? 'Today at 7:00 AM' : 'Tomorrow at 7:00 AM'
+
+    const targetLocalDate = new Date(Date.UTC(laYear, laMonth - 1, laHour < 7 ? laDay : laDay + 1))
+    const tYear = targetLocalDate.getUTCFullYear()
+    const tMonth = targetLocalDate.getUTCMonth()
+    const tDay = targetLocalDate.getUTCDate()
+
+    const candidateUtc = new Date(Date.UTC(tYear, tMonth, tDay, 15, 0, 0))
+    const candidateParts = formatter.formatToParts(candidateUtc)
+    const candidateLaHour = Number(candidateParts.find(p => p.type === 'hour')?.value || '7')
+    const hourDiff = candidateLaHour - 7
+    const exact7AmUtc = new Date(candidateUtc.getTime() - hourDiff * 60 * 60 * 1000)
+
+    return {
+      isQuietHours,
+      next7AMLabel,
+      next7AMIso: exact7AmUtc.toISOString(),
+    }
+  }
+
+  const handleQueueSmsFor7AM = async () => {
+    if (!smsConfirmPrompt || !smsConfirmMessage.trim() || isDispatchingConfirmSms) return
+    setIsDispatchingConfirmSms(true)
+    try {
+      const { next7AMLabel, next7AMIso } = getPacificQuietHoursInfo()
+      const cleanDestPhone = cleanPhone(smsConfirmPrompt.clientPhone)
+      const trimmedMsg = smsConfirmMessage.trim()
+
+      const { data: invokeData, error: invokeErr } = await supabase.functions.invoke('twilio-sms', {
+        body: {
+          to: cleanDestPhone,
+          message: trimmedMsg,
+          scheduleFor7AM: true,
+          appointmentId: smsConfirmPrompt.appointmentId || null,
+        }
+      })
+
+      // Fallback to direct table insert if cloud Edge Function hasn't been redeployed with scheduleFor7AM support yet
+      if (invokeErr || !invokeData?.queued) {
+        const { error: fallbackErr } = await supabase
+          .from('scheduled_sms_queue')
+          .insert({
+            to_phone: cleanDestPhone,
+            message: trimmedMsg,
+            send_after: next7AMIso,
+            status: 'pending',
+            appointment_id: smsConfirmPrompt.appointmentId || null,
+          })
+        if (fallbackErr) throw fallbackErr
+      }
+
+      setStatusBanner({
+        type: 'success',
+        message: `SMS to ${smsConfirmPrompt.clientName} queued for 7:00 AM Pacific (${next7AMLabel}).`
+      })
+      setSmsConfirmPrompt(null)
+      setOverrideQuietHoursSendNow(false)
+    } catch (err: any) {
+      console.error('Failed to queue SMS for 7:00 AM:', err)
+      alert(`Failed to queue SMS for 7:00 AM: ${err?.message || 'Unknown error'}`)
+    } finally {
+      setIsDispatchingConfirmSms(false)
+    }
+  }
+
+  const handleSendConfirmSmsNow = async () => {
+    if (!smsConfirmPrompt || !smsConfirmMessage.trim() || isDispatchingConfirmSms) return
+    setIsDispatchingConfirmSms(true)
+    try {
+      const cleanDestPhone = cleanPhone(smsConfirmPrompt.clientPhone)
+      const trimmedMsg = smsConfirmMessage.trim()
+
+      await supabase.functions.invoke('twilio-sms', {
+        body: {
+          to: cleanDestPhone,
+          message: trimmedMsg,
+        }
+      })
+
+      if (smsConfirmPrompt.barberPhone && smsConfirmPrompt.barberMessage) {
+        await supabase.functions.invoke('twilio-sms', {
+          body: {
+            to: smsConfirmPrompt.barberPhone,
+            message: smsConfirmPrompt.barberMessage,
+          }
+        })
+      }
+
+      setStatusBanner({
+        type: 'success',
+        message: `SMS sent to ${smsConfirmPrompt.clientName} (${formatPhoneNumber(cleanDestPhone)}).`
+      })
+      setSmsConfirmPrompt(null)
+      setOverrideQuietHoursSendNow(false)
+    } catch (err: any) {
+      console.error('Failed to send SMS:', err)
+      alert(`Failed to send SMS: ${err?.message || 'Unknown error'}`)
+    } finally {
+      setIsDispatchingConfirmSms(false)
+    }
+  }
+
   // --- SUBMIT HANDLERS ---
-  const handleAdminBooking = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const submitAdminBooking = async (bypassConflictCheck = false) => {
     if (isBlockoutMode) {
       if (!bookDate || !bookTime || !blockEndTime) return
     } else {
@@ -1169,6 +1333,7 @@ export default function AdminDashboard() {
       let proposedStartTime: number
       let proposedEndTime: number
       let endTimeStr: string
+      let proposedDuration: number
 
       if (isBlockoutMode) {
         proposedStartTime = toMinutes(bookTime)
@@ -1178,36 +1343,59 @@ export default function AdminDashboard() {
           setIsBooking(false)
           return
         }
+        proposedDuration = proposedEndTime - proposedStartTime
         endTimeStr = `${Math.floor(proposedEndTime / 60).toString().padStart(2, '0')}:${(proposedEndTime % 60).toString().padStart(2, '0')}:00`
       } else {
-        const duration = Math.max(15, bookTotalDurationMinutes)
+        proposedDuration = Math.max(15, bookTotalDurationMinutes)
         proposedStartTime = toMinutes(bookTime)
-        proposedEndTime = proposedStartTime + duration
+        proposedEndTime = proposedStartTime + proposedDuration
         endTimeStr = `${Math.floor(proposedEndTime / 60).toString().padStart(2, '0')}:${(proposedEndTime % 60).toString().padStart(2, '0')}:00`
       }
 
-      // Check conflicts on bookDate (for single bookings or non-repeating blockouts)
-      if (!isBlockoutMode || !isRepeatingBlockout) {
+      // Check conflicts on bookDate (for single bookings or non-repeating blockouts) unless overridden
+      if ((!isBlockoutMode || !isRepeatingBlockout) && !bypassConflictCheck) {
         const { data: conflicts, error: conflictErr } = await supabase
           .from('appointments')
-          .select('clients ( name ), start_time, end_time, is_blockout')
+          .select('clients ( name ), start_time, end_time, status, notes, is_blockout')
           .eq('barber_id', selectedBarberId)
           .eq('appointment_date', bookDate)
           .neq('status', 'cancelled')
         if (conflictErr) throw conflictErr
 
-        if (conflicts) {
-          // Universal Overlap Formula: (proposedStartTime < existingAppt.end_time) && (proposedEndTime > existingAppt.start_time)
-          const conflict = conflicts.find((c: any) => {
-            const cStart = toMinutes(c.start_time)
-            const cEnd = toMinutes(c.end_time)
-            return (proposedStartTime < cEnd) && (proposedEndTime > cStart)
+        const overlappingAppts = (conflicts || []).filter((c: any) => {
+          const cStart = toMinutes(c.start_time)
+          const cEnd = toMinutes(c.end_time)
+          return (proposedStartTime < cEnd) && (proposedEndTime > cStart)
+        })
+
+        if (overlappingAppts.length > 0) {
+          const activeBarberName = barbers.find(b => b.id === selectedBarberId)?.name || 'Barber'
+          const reasons: string[] = overlappingAppts.map((c: any) => {
+            const cLabel = c.is_blockout
+              ? (c.notes || 'Blocked Time')
+              : c.status === 'blocked'
+              ? 'Blocked Time'
+              : (c.clients?.name || 'Walk-In')
+            return `Overlaps with ${cLabel} (${formatTime(c.start_time)} – ${formatTime(c.end_time)})`
           })
-          if (conflict) {
-            const conflictName = (conflict as any).is_blockout ? 'Blocked Time' : (conflict as any).clients?.name || 'Walk-In'
-            alert(`Not enough time! Slot overlaps with existing booking (${conflictName} at ${formatTime(conflict.start_time)}).`)
-            return
+          if (!isBlockoutMode && isOutsideBarberSchedule(bookDate, bookTime, proposedDuration)) {
+            reasons.push(`Falls outside ${activeBarberName}'s scheduled working hours / on a scheduled day off`)
           }
+          const actionLabel = isBlockoutMode
+            ? `Block Time (${formatTime(bookTime)} – ${formatTime(endTimeStr)}) on ${formatDisplayDate(bookDate)}`
+            : `${clientName.trim()} — ${bookServices.map(s => s.name).join(' + ')} (${formatTime(bookTime)} – ${formatTime(endTimeStr)}) on ${formatDisplayDate(bookDate)}`
+
+          setIsBooking(false)
+          setConflictOverridePrompt({
+            title: 'Schedule Conflict Override',
+            proposedSummary: actionLabel,
+            reasons,
+            onConfirm: () => {
+              setConflictOverridePrompt(null)
+              submitAdminBooking(true)
+            }
+          })
+          return
         }
       }
 
@@ -1262,10 +1450,10 @@ export default function AdminDashboard() {
       const nowIso = new Date().toISOString()
       const startTimeFormatted = `${bookTime.slice(0, 5)}:00`
 
+      let insertedApptId: string | null = null
+
       if (isBlockoutMode && isRepeatingBlockout) {
-        const startDt = new Date(bookDate + 'T12:00:00Z')
-        const endDt = new Date(startDt.getTime() + 56 * 24 * 60 * 60 * 1000)
-        const endDateStr = endDt.toISOString().split('T')[0]
+        const { startDt, daysUntilSunday, endDateStr, formattedCutoff } = getEndOfWeekSundayInfo(bookDate)
 
         const [ovRes, existingBlocksRes] = await Promise.all([
           supabase
@@ -1288,13 +1476,13 @@ export default function AdminDashboard() {
         const existingBlocks = existingBlocksRes.data || []
         const rowsToInsert: any[] = []
 
-        for (let d = 0; d <= 56; d++) {
+        for (let d = 0; d <= daysUntilSunday; d++) {
           const curDt = new Date(startDt.getTime() + d * 24 * 60 * 60 * 1000)
           const curDateStr = curDt.toISOString().split('T')[0]
 
           const isWorkingDay = !isNonWorkingDate(curDateStr, rangeOverrides)
 
-          // Include bookDate itself plus every working day in the 8-week window
+          // Include bookDate itself plus every working day through Sunday of the current week
           if (curDateStr !== bookDate && !isWorkingDay) continue
 
           // Skip if a blockout already exists at the exact same date & start_time
@@ -1327,7 +1515,7 @@ export default function AdminDashboard() {
 
         setStatusBanner({
           type: 'success',
-          message: `Blocked time across ${rowsToInsert.length} working day${rowsToInsert.length === 1 ? '' : 's'} (next 8 weeks).`
+          message: `Blocked time across ${rowsToInsert.length} working day${rowsToInsert.length === 1 ? '' : 's'} through ${formattedCutoff}.`
         })
       } else {
         const combinedNames = bookServices.map(s => s.name).join(' + ')
@@ -1353,38 +1541,43 @@ export default function AdminDashboard() {
           insertPayload.service_id = bookServices[0].id
         }
 
-        const { error: apptErr } = await supabase.from('appointments').insert(insertPayload)
+        const { data: insertedAppt, error: apptErr } = await supabase
+          .from('appointments')
+          .insert(insertPayload)
+          .select('id')
+          .single()
         if (apptErr) throw apptErr
+        insertedApptId = insertedAppt?.id || null
       }
 
-      // Dispatch Twilio SMS Notifications (only for real client bookings)
+      // Open Barber SMS Confirmation Modal (for real client bookings with a valid phone number)
       if (!isBlockoutMode) {
-        try {
+        const cleanedDest = cleanPhone(clientPhone)
+        if (cleanedDest.length === 10 && cleanedDest !== '0000000000') {
           const assignedBarber = barbers.find(b => b.id === selectedBarberId)
           const barberName = assignedBarber?.name || loggedInBarber?.name || 'LifeStyle Barber'
-          const friendlyDate = new Date(bookDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
-          const combinedServiceNames = bookServices.map(s => s.name).join(' + ')
-
-          // 1. Notify Client
-          await supabase.functions.invoke('twilio-sms', {
-            body: {
-              to: clientPhone,
-              message: `LifeStyle Barber: Your appointment with ${barberName} for ${combinedServiceNames} is confirmed for ${friendlyDate} at ${formatTime(bookTime)}. Reply CANCEL to cancel. Reply STOP to unsubscribe.`
-            }
+          const friendlyDate = new Date(bookDate + 'T12:00:00Z').toLocaleDateString('en-US', {
+            month: 'long',
+            day: 'numeric',
+            year: 'numeric',
+            timeZone: 'UTC'
           })
+          const combinedServiceNames = bookServices.map(s => s.name).join(' + ')
+          const firstName = getFriendlyFirstName(clientName)
+          const draftedMsg = `Hey ${firstName}, your appointment at LifeStyle Barber with ${barberName} for ${combinedServiceNames} is confirmed for ${friendlyDate} at ${formatTime(bookTime)}. Reply CANCEL to cancel. Reply STOP to unsubscribe.`
+          const barberPhone = assignedBarber?.phone || loggedInBarber?.phone || null
 
-          // 2. Notify Barber (if phone available)
-          const barberPhone = assignedBarber?.phone || loggedInBarber?.phone
-          if (barberPhone && barberPhone !== clientPhone) {
-            await supabase.functions.invoke('twilio-sms', {
-              body: {
-                to: barberPhone,
-                message: `LifeStyle Barber: New booking with ${clientName} (${clientPhone}) for ${combinedServiceNames} on ${friendlyDate} at ${formatTime(bookTime)}.`
-              }
-            })
-          }
-        } catch (smsErr) {
-          console.error("SMS Dispatch Failed:", smsErr)
+          setOverrideQuietHoursSendNow(false)
+          setSmsConfirmMessage(draftedMsg)
+          setSmsConfirmPrompt({
+            contextTitle: 'New Booking Text',
+            changeSummary: `Booked with ${barberName} • ${combinedServiceNames} • ${friendlyDate} at ${formatTime(bookTime)}`,
+            clientName: clientName.trim(),
+            clientPhone: cleanedDest,
+            appointmentId: insertedApptId,
+            barberPhone: barberPhone && cleanPhone(barberPhone) !== cleanedDest ? barberPhone : null,
+            barberMessage: `LifeStyle Barber: New booking with ${clientName.trim()} (${formatPhoneNumber(cleanedDest)}) for ${combinedServiceNames} on ${friendlyDate} at ${formatTime(bookTime)}.`,
+          })
         }
       }
 
@@ -1409,8 +1602,13 @@ export default function AdminDashboard() {
     }
   }
 
+  const handleAdminBooking = async (e: React.FormEvent) => {
+    e.preventDefault()
+    await submitAdminBooking(false)
+  }
+
   // --- DRAG-AND-DROP RESCHEDULING HANDLER ---
-  const handleDropReschedule = async (apptToMove: any, newDate: string, newStartTime: string) => {
+  const handleDropReschedule = async (apptToMove: any, newDate: string, newStartTime: string, bypassConflictCheck = false) => {
     if (!apptToMove || !newDate || !newStartTime || isRescheduling) return
 
     // A. Calculate the new start_time and appointment_date based on where it landed
@@ -1444,32 +1642,58 @@ export default function AdminDashboard() {
     setIsRescheduling(true)
 
     try {
-      // Run strict universal collision math against existing appointments (STRICTLY EXCLUDE THE DRAGGED APPOINTMENT ITSELF)
-      const { data: conflicts, error: conflictErr } = await supabase
-        .from('appointments')
-        .select('id, clients ( name ), start_time, end_time')
-        .eq('barber_id', targetBarberId)
-        .eq('appointment_date', newDate)
-        .neq('status', 'cancelled')
+      if (!bypassConflictCheck) {
+        // Run strict universal collision math against existing appointments (STRICTLY EXCLUDE THE DRAGGED APPOINTMENT ITSELF)
+        const { data: conflicts, error: conflictErr } = await supabase
+          .from('appointments')
+          .select('id, clients ( name ), start_time, end_time, status, notes, is_blockout')
+          .eq('barber_id', targetBarberId)
+          .eq('appointment_date', newDate)
+          .neq('status', 'cancelled')
 
-      if (conflictErr) throw conflictErr
+        if (conflictErr) throw conflictErr
 
-      if (conflicts) {
-        const hasCollision = conflicts.some((c: any) => {
-          if (c.id === apptToMove.id || String(c.id) === String(apptToMove.id)) return false // Exclude dragged appointment itself
+        const overlappingAppts = (conflicts || []).filter((c: any) => {
+          if (c.id === apptToMove.id || String(c.id) === String(apptToMove.id)) return false
           const cStart = toMinutes(c.start_time)
           const cEnd = toMinutes(c.end_time)
           return (newStartMins < cEnd) && (newEndMins > cStart)
         })
 
-        // 4. If it collides, snap the appointment back to its original spot and throw an alert
-        if (hasCollision) {
-          alert("Not enough time! Slot overlaps with existing booking.")
+        const isOut = !apptToMove.is_blockout && isOutsideBarberSchedule(newDate, newStartTimeStr, duration)
+
+        if (overlappingAppts.length > 0 || isOut) {
+          const activeBarberName = barbers.find(b => b.id === targetBarberId)?.name || 'Barber'
+          const reasons: string[] = overlappingAppts.map((c: any) => {
+            const cLabel = c.is_blockout
+              ? (c.notes || 'Blocked Time')
+              : c.status === 'blocked'
+              ? 'Blocked Time'
+              : (c.clients?.name || 'Walk-In')
+            return `Overlaps with ${cLabel} (${formatTime(c.start_time)} – ${formatTime(c.end_time)})`
+          })
+          if (isOut) {
+            reasons.push(`Falls outside ${activeBarberName}'s scheduled working hours / on a scheduled day off`)
+          }
+          const movedLabel = apptToMove.is_blockout
+            ? (apptToMove.notes || 'Blocked Time')
+            : (apptToMove.clients?.name || 'Walk-In')
+
+          setIsRescheduling(false)
+          setConflictOverridePrompt({
+            title: 'Schedule Conflict Override',
+            proposedSummary: `Move ${movedLabel} to ${formatDisplayDate(newDate)} (${formatTime(newStartTimeStr)} – ${formatTime(newEndTimeStr)})`,
+            reasons,
+            onConfirm: () => {
+              setConflictOverridePrompt(null)
+              handleDropReschedule(apptToMove, newDate, newStartTime, true)
+            }
+          })
           return
         }
       }
 
-      // 5. If clear, immediately run supabase update and refresh the calendar
+      // If clear or overridden, immediately run supabase update and refresh the calendar
       const { error: updateErr } = await supabase
         .from('appointments')
         .update({
@@ -1482,6 +1706,42 @@ export default function AdminDashboard() {
       if (updateErr) throw new Error(updateErr.message)
 
       setRefreshTrigger(prev => prev + 1)
+
+      // Open Barber SMS Confirmation Modal for moved client appointments with a real phone number
+      if (!apptToMove.is_blockout && apptToMove.status !== 'blocked') {
+        const cleanedDest = cleanPhone(apptToMove.clients?.phone || '')
+        if (cleanedDest.length === 10 && cleanedDest !== '0000000000') {
+          const oldBarberName = barbers.find(b => b.id === apptToMove.barber_id)?.name || 'LifeStyle Barber'
+          const newBarberName = barbers.find(b => b.id === targetBarberId)?.name || oldBarberName
+          const oldFriendlyDate = new Date(currentApptDate + 'T12:00:00Z').toLocaleDateString('en-US', {
+            month: 'long',
+            day: 'numeric',
+            year: 'numeric',
+            timeZone: 'UTC'
+          })
+          const newFriendlyDate = new Date(newDate + 'T12:00:00Z').toLocaleDateString('en-US', {
+            month: 'long',
+            day: 'numeric',
+            year: 'numeric',
+            timeZone: 'UTC'
+          })
+          const oldTimeFormatted = formatTime(apptToMove.start_time)
+          const newTimeFormatted = formatTime(newStartTimeStr)
+          const serviceName = apptToMove.services?.name || 'appointment'
+          const firstName = getFriendlyFirstName(apptToMove.clients?.name)
+          const draftedMsg = `Hey ${firstName}, your ${serviceName} at LifeStyle Barber with ${newBarberName} has been rescheduled from ${oldFriendlyDate} at ${oldTimeFormatted} to ${newFriendlyDate} at ${newTimeFormatted}. Please let us know if you need any adjustments! Reply STOP to unsubscribe.`
+
+          setOverrideQuietHoursSendNow(false)
+          setSmsConfirmMessage(draftedMsg)
+          setSmsConfirmPrompt({
+            contextTitle: 'Appointment Move / Reschedule Text',
+            changeSummary: `${oldBarberName} (${oldFriendlyDate} at ${oldTimeFormatted}) → ${newBarberName} (${newFriendlyDate} at ${newTimeFormatted})`,
+            clientName: apptToMove.clients?.name || 'Client',
+            clientPhone: cleanedDest,
+            appointmentId: apptToMove.id,
+          })
+        }
+      }
     } catch (err: any) {
       console.error("Failed to reschedule:", err)
       alert(`Failed to reschedule appointment: ${err?.message || 'Unknown error'}`)
@@ -1804,8 +2064,7 @@ export default function AdminDashboard() {
     setShowBookModal(true)
   }
 
-  const handleSaveEditedAppointment = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const submitEditedAppointment = async (bypassConflictCheck = false) => {
     if (!selectedAppt?.id || !editApptDate || !editApptTime || editApptServices.length === 0) return
     setIsUpdatingAppt(true)
     try {
@@ -1822,25 +2081,48 @@ export default function AdminDashboard() {
       const newEndStr = `${Math.floor(endMins / 60).toString().padStart(2, '0')}:${(endMins % 60).toString().padStart(2, '0')}:00`
 
       const targetBarberId = selectedAppt.barber_id || selectedBarberId
-      const { data: conflicts, error: conflictErr } = await supabase
-        .from('appointments')
-        .select('id, clients ( name ), start_time, end_time, is_blockout')
-        .eq('barber_id', targetBarberId)
-        .eq('appointment_date', editApptDate)
-        .neq('status', 'cancelled')
-      if (conflictErr) throw conflictErr
+      if (!bypassConflictCheck) {
+        const { data: conflicts, error: conflictErr } = await supabase
+          .from('appointments')
+          .select('id, clients ( name ), start_time, end_time, status, notes, is_blockout')
+          .eq('barber_id', targetBarberId)
+          .eq('appointment_date', editApptDate)
+          .neq('status', 'cancelled')
+        if (conflictErr) throw conflictErr
 
-      if (conflicts) {
-        const conflict = conflicts.find((c: any) => {
+        const overlappingAppts = (conflicts || []).filter((c: any) => {
           if (String(c.id) === String(selectedAppt.id)) return false
           const cStart = toMinutes(c.start_time)
           const cEnd = toMinutes(c.end_time)
           return startMins < cEnd && endMins > cStart
         })
-        if (conflict) {
-          const conflictName = (conflict as any).is_blockout ? 'Blocked Time' : (conflict as any).clients?.name || 'Walk-In'
-          alert(`Not enough time! Slot overlaps with existing booking (${conflictName} at ${formatTime(conflict.start_time)}).`)
+
+        const isOut = isOutsideBarberSchedule(editApptDate, editApptTime, combinedDuration)
+
+        if (overlappingAppts.length > 0 || isOut) {
+          const activeBarberName = barbers.find(b => b.id === targetBarberId)?.name || 'Barber'
+          const reasons: string[] = overlappingAppts.map((c: any) => {
+            const cLabel = c.is_blockout
+              ? (c.notes || 'Blocked Time')
+              : c.status === 'blocked'
+              ? 'Blocked Time'
+              : (c.clients?.name || 'Walk-In')
+            return `Overlaps with ${cLabel} (${formatTime(c.start_time)} – ${formatTime(c.end_time)})`
+          })
+          if (isOut) {
+            reasons.push(`Falls outside ${activeBarberName}'s scheduled working hours / on a scheduled day off`)
+          }
+
           setIsUpdatingAppt(false)
+          setConflictOverridePrompt({
+            title: 'Schedule Conflict Override',
+            proposedSummary: `Update ${selectedAppt.clients?.name || 'Appointment'} — ${combinedNames} (${formatTime(editApptTime)} – ${formatTime(newEndStr)}) on ${formatDisplayDate(editApptDate)}`,
+            reasons,
+            onConfirm: () => {
+              setConflictOverridePrompt(null)
+              submitEditedAppointment(true)
+            }
+          })
           return
         }
       }
@@ -1849,6 +2131,11 @@ export default function AdminDashboard() {
       const updatedNotes = editApptServices.length > 1
         ? `[Services: ${combinedNames} ($${combinedPrice})]${trimmedEditNotes ? ` - ${trimmedEditNotes}` : ''}`
         : (trimmedEditNotes || null)
+
+      const oldApptDate = (selectedAppt.appointment_date || selectedDate).split('T')[0].trim()
+      const oldApptStart = (selectedAppt.start_time || '').slice(0, 5)
+      const hasScheduleChange = oldApptDate !== editApptDate || oldApptStart !== editApptTime.slice(0, 5)
+      const editedApptSnapshot = selectedAppt
 
       const { error: updateErr } = await supabase
         .from('appointments')
@@ -1867,12 +2154,50 @@ export default function AdminDashboard() {
       setShowApptModal(false)
       setSelectedAppt(null)
       setRefreshTrigger(prev => prev + 1)
+
+      if (hasScheduleChange && !editedApptSnapshot.is_blockout && editedApptSnapshot.status !== 'blocked') {
+        const cleanedDest = cleanPhone(editedApptSnapshot.clients?.phone || '')
+        if (cleanedDest.length === 10 && cleanedDest !== '0000000000') {
+          const barberName = barbers.find(b => b.id === targetBarberId)?.name || 'LifeStyle Barber'
+          const oldFriendlyDate = new Date(oldApptDate + 'T12:00:00Z').toLocaleDateString('en-US', {
+            month: 'long',
+            day: 'numeric',
+            year: 'numeric',
+            timeZone: 'UTC'
+          })
+          const newFriendlyDate = new Date(editApptDate + 'T12:00:00Z').toLocaleDateString('en-US', {
+            month: 'long',
+            day: 'numeric',
+            year: 'numeric',
+            timeZone: 'UTC'
+          })
+          const oldTimeFormatted = formatTime(oldApptStart)
+          const newTimeFormatted = formatTime(editApptTime)
+          const firstName = getFriendlyFirstName(editedApptSnapshot.clients?.name)
+          const draftedMsg = `Hey ${firstName}, your ${combinedNames} appointment at LifeStyle Barber with ${barberName} has been rescheduled from ${oldFriendlyDate} at ${oldTimeFormatted} to ${newFriendlyDate} at ${newTimeFormatted}. Please let us know if you need any adjustments! Reply STOP to unsubscribe.`
+
+          setOverrideQuietHoursSendNow(false)
+          setSmsConfirmMessage(draftedMsg)
+          setSmsConfirmPrompt({
+            contextTitle: 'Appointment Move / Reschedule Text',
+            changeSummary: `${barberName}: ${oldFriendlyDate} at ${oldTimeFormatted} → ${newFriendlyDate} at ${newTimeFormatted}`,
+            clientName: editedApptSnapshot.clients?.name || 'Client',
+            clientPhone: cleanedDest,
+            appointmentId: editedApptSnapshot.id,
+          })
+        }
+      }
     } catch (err: any) {
       console.error('Failed to update appointment:', err)
       alert(`Failed to update appointment: ${err?.message || 'Database error'}`)
     } finally {
       setIsUpdatingAppt(false)
     }
+  }
+
+  const handleSaveEditedAppointment = async (e: React.FormEvent) => {
+    e.preventDefault()
+    await submitEditedAppointment(false)
   }
 
   const handleSaveNotes = async () => {
@@ -3032,12 +3357,20 @@ export default function AdminDashboard() {
     const currentTop = ((currentMins - CALENDAR_START_HOUR * 60) / 60) * PIXELS_PER_HOUR
     const shift = !isOff ? getBarberShiftMins(selectedBarberId, gridDate) : null
 
-    const offHoursShadeStyle = {
-      backgroundColor: isLight ? 'rgba(23, 15, 46, 0.08)' : 'rgba(4, 2, 8, 0.5)',
-      backgroundImage: isLight
-        ? 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(23, 15, 46, 0.06) 10px, rgba(23, 15, 46, 0.06) 20px)'
-        : 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(4, 2, 8, 0.42) 10px, rgba(4, 2, 8, 0.42) 20px)'
-    }
+    const offHoursShadeStyle = isLight
+      ? {
+          backgroundColor: 'rgba(23, 15, 46, 0.08)',
+          backgroundImage:
+            'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(23, 15, 46, 0.06) 10px, rgba(23, 15, 46, 0.06) 20px)',
+        }
+      : {
+          backgroundColor: '#050308',
+          backgroundImage: `
+            repeating-linear-gradient(-45deg, rgba(255, 255, 255, 0.045) 0px, rgba(255, 255, 255, 0.045) 4px, transparent 4px, transparent 10px),
+            linear-gradient(to bottom, rgba(255, 255, 255, 0.04) 1px, transparent 1px)
+          `,
+          backgroundSize: `auto, 100% ${PIXELS_PER_HOUR}px`,
+        }
 
     return (
       <div
@@ -3046,9 +3379,10 @@ export default function AdminDashboard() {
         className={`relative flex-1 w-full ${isWeekView ? 'border-r border-[var(--color-brand-700)]/60 min-w-0' : 'w-full'}`}
         style={{
           height: `${TOTAL_RAIL_HEIGHT}px`,
+          backgroundColor: isLight ? undefined : (isOff ? '#050308' : 'rgba(35, 18, 66, 0.55)'),
           backgroundImage: `
-            linear-gradient(to bottom, ${isLight ? 'rgba(23, 15, 46, 0.16)' : 'rgba(196, 181, 253, 0.16)'} 1px, transparent 1px),
-            linear-gradient(to bottom, ${isLight ? 'rgba(23, 15, 46, 0.06)' : 'rgba(196, 181, 253, 0.05)'} 1px, transparent 1px)
+            linear-gradient(to bottom, ${isLight ? 'rgba(23, 15, 46, 0.16)' : (isOff ? 'rgba(255, 255, 255, 0.04)' : 'rgba(196, 181, 253, 0.20)')} 1px, transparent 1px),
+            linear-gradient(to bottom, ${isLight ? 'rgba(23, 15, 46, 0.06)' : (isOff ? 'rgba(255, 255, 255, 0.015)' : 'rgba(196, 181, 253, 0.07)')} 1px, transparent 1px)
           `,
           backgroundSize: `100% ${PIXELS_PER_HOUR}px, 100% ${SLOT_HEIGHT}px`,
           backgroundRepeat: 'repeat-y',
@@ -3057,7 +3391,11 @@ export default function AdminDashboard() {
         {/* Out-of-Hours Shading on Working Days (Before Shift & After Shift) */}
         {shift && shift.startMins > 0 && (
           <div
-            className="absolute left-0 w-full bg-[var(--color-brand-900)]/50 opacity-50 pointer-events-none z-0 border-b border-[var(--color-brand-700)]/50"
+            className={`absolute left-0 w-full pointer-events-none z-0 ${
+              isLight
+                ? 'bg-[var(--color-brand-900)]/50 opacity-50 border-b border-[var(--color-brand-700)]/50'
+                : 'bg-black/75 opacity-95 border-b border-[var(--color-brand-700)]'
+            }`}
             style={{
               top: 0,
               height: `${shift.startMins * (PIXELS_PER_HOUR / 60)}px`,
@@ -3067,7 +3405,11 @@ export default function AdminDashboard() {
         )}
         {shift && shift.endMins < 24 * 60 && (
           <div
-            className="absolute left-0 w-full bg-[var(--color-brand-900)]/50 opacity-50 pointer-events-none z-0 border-t border-[var(--color-brand-700)]/50"
+            className={`absolute left-0 w-full pointer-events-none z-0 ${
+              isLight
+                ? 'bg-[var(--color-brand-900)]/50 opacity-50 border-t border-[var(--color-brand-700)]/50'
+                : 'bg-black/75 opacity-95 border-t border-[var(--color-brand-700)]'
+            }`}
             style={{
               top: `${shift.endMins * (PIXELS_PER_HOUR / 60)}px`,
               bottom: 0,
@@ -3076,16 +3418,26 @@ export default function AdminDashboard() {
           />
         )}
 
-        {/* Subtle non-working day shaded diagonal-stripe backdrop (slots remain clickable for extra shifts) */}
+        {/* Non-working day shaded diagonal-stripe backdrop (slots remain clickable for extra shifts) */}
         {isOff && (
           <div
-            className="absolute inset-0 z-[5] pointer-events-none"
-            style={{
-              backgroundColor: isLight ? 'rgba(23, 15, 46, 0.07)' : 'rgba(4, 2, 8, 0.48)',
-              backgroundImage: isLight
-                ? 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(23, 15, 46, 0.06) 10px, rgba(23, 15, 46, 0.06) 20px)'
-                : 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(4, 2, 8, 0.42) 10px, rgba(4, 2, 8, 0.42) 20px)'
-            }}
+            className={`absolute inset-0 z-[5] pointer-events-none ${isLight ? '' : 'bg-black/75'}`}
+            style={
+              isLight
+                ? {
+                    backgroundColor: 'rgba(23, 15, 46, 0.07)',
+                    backgroundImage:
+                      'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(23, 15, 46, 0.06) 10px, rgba(23, 15, 46, 0.06) 20px)',
+                  }
+                : {
+                    backgroundColor: 'rgba(5, 3, 8, 0.85)',
+                    backgroundImage: `
+                      repeating-linear-gradient(-45deg, rgba(255, 255, 255, 0.045) 0px, rgba(255, 255, 255, 0.045) 4px, transparent 4px, transparent 10px),
+                      linear-gradient(to bottom, rgba(255, 255, 255, 0.04) 1px, transparent 1px)
+                    `,
+                    backgroundSize: `auto, 100% ${PIXELS_PER_HOUR}px`,
+                  }
+            }
           />
         )}
 
@@ -3455,50 +3807,47 @@ export default function AdminDashboard() {
                     </select>
                   </div>
 
-                  {/* Start Time Dropdown (ignoring this appointment's own overlap) */}
+                  {/* Start Time Dropdown (ignoring this appointment's own overlap, plus occupied double-book override slots) */}
                   <div>
                     <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">
                       Start Time
                     </label>
                     {(() => {
                       const outsideEditSlots = editApptAllSlots.filter(t => !editApptRegularSlots.includes(t))
-                      const validEditSlots = editApptRegularSlots.length > 0
-                        ? [...editApptRegularSlots, ...outsideEditSlots]
-                        : editApptAllSlots
+                      const occupiedEditSlots = ALL_DAY_15_MIN_SLOTS.filter(
+                        t => !editApptRegularSlots.includes(t) && !outsideEditSlots.includes(t)
+                      )
                       return (
                         <select
                           required
-                          value={validEditSlots.includes(editApptTime) ? editApptTime : ''}
+                          value={ALL_DAY_15_MIN_SLOTS.includes(editApptTime) ? editApptTime : ''}
                           onChange={(e) => setEditApptTime(e.target.value)}
-                          disabled={editApptServices.length === 0 || validEditSlots.length === 0}
+                          disabled={editApptServices.length === 0}
                           className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer disabled:opacity-50 text-[var(--color-brand-light)]"
                         >
                           <option value="" disabled>
-                            {editApptServices.length === 0
-                              ? 'Add a service first'
-                              : validEditSlots.length === 0
-                              ? 'No open slots on this date'
-                              : 'Select time...'}
+                            {editApptServices.length === 0 ? 'Add a service first' : 'Select time...'}
                           </option>
-                          {editApptRegularSlots.length > 0 ? (
-                            <>
-                              <optgroup label="Regular Scheduled Hours">
-                                {editApptRegularSlots.map(time => (
-                                  <option key={time} value={time}>{formatTime(time)}</option>
-                                ))}
-                              </optgroup>
-                              {outsideEditSlots.length > 0 && (
-                                <optgroup label="Outside Scheduled Hours (Squeeze-In / Exception)">
-                                  {outsideEditSlots.map(time => (
-                                    <option key={time} value={time}>{formatTime(time)}</option>
-                                  ))}
-                                </optgroup>
-                              )}
-                            </>
-                          ) : (
-                            editApptAllSlots.map(time => (
-                              <option key={time} value={time}>{formatTime(time)}</option>
-                            ))
+                          {editApptRegularSlots.length > 0 && (
+                            <optgroup label="Regular Scheduled Hours">
+                              {editApptRegularSlots.map(time => (
+                                <option key={time} value={time}>{formatTime(time)}</option>
+                              ))}
+                            </optgroup>
+                          )}
+                          {outsideEditSlots.length > 0 && (
+                            <optgroup label="Outside Scheduled Hours (Squeeze-In / Exception)">
+                              {outsideEditSlots.map(time => (
+                                <option key={time} value={time}>{formatTime(time)}</option>
+                              ))}
+                            </optgroup>
+                          )}
+                          {occupiedEditSlots.length > 0 && (
+                            <optgroup label="Occupied / Conflict Slots (Double-Book Override)">
+                              {occupiedEditSlots.map(time => (
+                                <option key={time} value={time}>{formatTime(time)} (Occupied)</option>
+                              ))}
+                            </optgroup>
                           )}
                         </select>
                       )
@@ -3711,6 +4060,216 @@ export default function AdminDashboard() {
         </div>
       )}
 
+      {/* BARBER SMS CONFIRMATION MODAL (3 DELIVERY CHOICES + 9PM-7AM PACIFIC QUIET HOURS GUARD) */}
+      {smsConfirmPrompt && (() => {
+        const { isQuietHours, next7AMLabel } = getPacificQuietHoursInfo()
+        const isSendNowLocked = isQuietHours && !overrideQuietHoursSendNow
+
+        return (
+          <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-[65] animate-in fade-in duration-200">
+            <div className="bg-[var(--color-brand-800)] w-full max-w-md rounded-2xl flex flex-col border border-[var(--color-brand-700)] shadow-2xl overflow-hidden max-h-[92vh]">
+              <div className="flex items-center justify-between p-5 sm:p-6 border-b border-[var(--color-brand-700)] flex-shrink-0">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="p-2 rounded-full bg-[var(--color-brand-900)] border border-[#D4AF37]/60 flex-shrink-0">
+                    <MessageSquare className="w-5 h-5 text-[var(--color-brand-gold)]" />
+                  </div>
+                  <div className="min-w-0">
+                    <h2 className="text-lg sm:text-xl font-bold text-[var(--color-brand-light)] truncate">
+                      {smsConfirmPrompt.contextTitle}
+                    </h2>
+                    <p className="text-xs text-[var(--color-brand-muted)] truncate">
+                      {smsConfirmPrompt.clientName} • <span className="font-mono">{formatPhoneNumber(smsConfirmPrompt.clientPhone)}</span>
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={isDispatchingConfirmSms}
+                  onClick={() => {
+                    setSmsConfirmPrompt(null)
+                    setOverrideQuietHoursSendNow(false)
+                  }}
+                  className="text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer flex-shrink-0"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+
+              <div className="p-5 sm:p-6 space-y-4 overflow-y-auto flex-1">
+                {/* Change Summary */}
+                <div className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 text-xs sm:text-sm font-bold text-[var(--color-brand-light)]">
+                  {smsConfirmPrompt.changeSummary}
+                </div>
+
+                {/* 9:00 PM - 7:00 AM Pacific Quiet Hours Warning Banner */}
+                {isQuietHours && (
+                  <div
+                    className={`rounded-xl p-3.5 border-2 space-y-2.5 shadow-md ${
+                      isLight
+                        ? 'bg-amber-100/95 border-amber-600 text-amber-950'
+                        : 'bg-amber-950/85 border-[#D4AF37]/80 text-amber-100'
+                    }`}
+                  >
+                    <div className="flex items-start gap-2.5">
+                      <Moon className={`w-4 h-4 flex-shrink-0 mt-0.5 ${isLight ? 'text-amber-700' : 'text-[var(--color-brand-gold)]'}`} />
+                      <div className="text-xs leading-snug">
+                        <span className="font-extrabold uppercase tracking-wide block mb-0.5">
+                          Quiet Hours Active (9:00 PM – 7:00 AM Pacific)
+                        </span>
+                        <span>
+                          Texts are held overnight so clients aren't woken up. Queue for <strong>{next7AMLabel}</strong> or check below to override.
+                        </span>
+                      </div>
+                    </div>
+
+                    <label className="flex items-center gap-2 pt-1 cursor-pointer select-none text-xs font-bold">
+                      <input
+                        type="checkbox"
+                        checked={overrideQuietHoursSendNow}
+                        onChange={(e) => setOverrideQuietHoursSendNow(e.target.checked)}
+                        className="w-4 h-4 rounded accent-[var(--color-brand-accent)] cursor-pointer"
+                      />
+                      <span>Override quiet hours &amp; send now</span>
+                    </label>
+                  </div>
+                )}
+
+                {/* Editable SMS Message Box */}
+                <div className="space-y-1.5">
+                  <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider">
+                    SMS Message Preview (Editable)
+                  </label>
+                  <textarea
+                    rows={4}
+                    value={smsConfirmMessage}
+                    onChange={(e) => setSmsConfirmMessage(e.target.value)}
+                    className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 text-xs sm:text-sm text-[var(--color-brand-light)] outline-none focus:border-[var(--color-brand-accent)] resize-none leading-relaxed"
+                  />
+                </div>
+
+                {/* 3 Delivery Action Buttons */}
+                <div className="flex flex-col gap-2.5 pt-2">
+                  <button
+                    type="button"
+                    disabled={isDispatchingConfirmSms || !smsConfirmMessage.trim()}
+                    onClick={handleQueueSmsFor7AM}
+                    className={`w-full py-3 px-4 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2 shadow-md ${
+                      isQuietHours
+                        ? 'bg-[var(--color-brand-accent)] hover:brightness-110 text-white ring-1 ring-[#D4AF37]/70'
+                        : 'bg-[var(--color-brand-periwinkle)]/15 border border-[var(--color-brand-periwinkle)]/60 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white'
+                    }`}
+                  >
+                    <Clock className="w-4 h-4" />
+                    <span>Wait Until 7:00 AM ({next7AMLabel})</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isDispatchingConfirmSms || !smsConfirmMessage.trim() || isSendNowLocked}
+                    onClick={handleSendConfirmSmsNow}
+                    className={`w-full py-3 px-4 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-md ${
+                      !isQuietHours
+                        ? 'bg-[var(--color-brand-accent)] hover:brightness-110 text-white'
+                        : 'bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] hover:border-[var(--color-brand-accent)] text-[var(--color-brand-light)]'
+                    }`}
+                  >
+                    <MessageSquare className="w-4 h-4" />
+                    <span>
+                      {isDispatchingConfirmSms
+                        ? 'Sending...'
+                        : isSendNowLocked
+                        ? 'Send Now (Locked During Quiet Hours)'
+                        : 'Send Now'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isDispatchingConfirmSms}
+                    onClick={() => {
+                      setSmsConfirmPrompt(null)
+                      setOverrideQuietHoursSendNow(false)
+                    }}
+                    className="w-full py-2.5 px-4 rounded-xl border border-[var(--color-brand-700)] text-xs sm:text-sm font-bold text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] hover:bg-[var(--color-brand-900)]/60 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    Don't Send Text
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* SCHEDULE CONFLICT OVERRIDE CONFIRMATION MODAL */}
+      {conflictOverridePrompt && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-[60] animate-in fade-in duration-200">
+          <div className="bg-[var(--color-brand-800)] w-full max-w-md rounded-2xl flex flex-col border border-[var(--color-brand-700)] shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between p-5 sm:p-6 border-b border-[var(--color-brand-700)]">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-full bg-[var(--color-brand-900)] border border-[#D4AF37]/60">
+                  <AlertTriangle className="w-5 h-5 text-[var(--color-brand-gold)]" />
+                </div>
+                <h2 className="text-lg sm:text-xl font-bold text-[var(--color-brand-light)]">
+                  {conflictOverridePrompt.title}
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setConflictOverridePrompt(null)}
+                className="text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+
+            <div className="p-5 sm:p-6 space-y-4">
+              <div className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 text-xs sm:text-sm font-bold text-[var(--color-brand-light)]">
+                {conflictOverridePrompt.proposedSummary}
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-xs font-bold uppercase tracking-wider text-[var(--color-brand-gold)]">
+                  Conflict Details:
+                </p>
+                <ul className="space-y-1.5">
+                  {conflictOverridePrompt.reasons.map((reason, idx) => (
+                    <li
+                      key={idx}
+                      className="flex items-start gap-2 text-xs sm:text-sm text-[var(--color-brand-light)] bg-[var(--color-brand-900)]/70 border border-[var(--color-brand-700)]/70 rounded-lg px-3 py-2"
+                    >
+                      <AlertTriangle className="w-4 h-4 text-[var(--color-brand-gold)] flex-shrink-0 mt-0.5" />
+                      <span>{reason}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <p className="text-xs sm:text-sm text-[var(--color-brand-muted)] leading-relaxed">
+                Would you like to override this schedule conflict and confirm anyway?
+              </p>
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setConflictOverridePrompt(null)}
+                  className="px-4 py-2.5 rounded-xl border border-[var(--color-brand-700)] text-sm font-bold text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] hover:bg-[var(--color-brand-900)]/60 transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={conflictOverridePrompt.onConfirm}
+                  className="px-5 py-2.5 rounded-xl bg-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle-hover)] text-white text-sm font-bold transition-all cursor-pointer shadow-md"
+                >
+                  Override & Confirm
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* UPFRONT OUTSIDE WORKING HOURS CONFIRMATION GATE MODAL */}
       {outOfHoursPrompt && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
@@ -3914,52 +4473,47 @@ export default function AdminDashboard() {
                        </select>
                      </div>
 
-                     {/* START TIME SELECT (REGULAR OPEN SLOTS + SQUEEZE-IN / EXCEPTION SLOTS) */}
+                     {/* START TIME SELECT (REGULAR OPEN SLOTS + SQUEEZE-IN / EXCEPTION SLOTS + OCCUPIED OVERRIDE SLOTS) */}
                      <div>
                        <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-1.5">Start Time</label>
                        {(() => {
                          const outsideSlots = allCollisionFreeSlots.filter(t => !bookSlots.includes(t))
-                         const combinedValidSlots = bookSlots.length > 0 ? [...bookSlots, ...outsideSlots] : allCollisionFreeSlots
+                         const occupiedSlots = ALL_DAY_15_MIN_SLOTS.filter(
+                           t => !bookSlots.includes(t) && !outsideSlots.includes(t)
+                         )
                          return (
                            <>
                              <select
                                required
-                               value={combinedValidSlots.includes(bookTime) ? bookTime : ''}
+                               value={ALL_DAY_15_MIN_SLOTS.includes(bookTime) ? bookTime : ''}
                                onChange={(e) => setBookTime(e.target.value)}
-                               disabled={combinedValidSlots.length === 0}
-                               className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer disabled:opacity-50 text-[var(--color-brand-light)]"
+                               className="w-full bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-3 outline-none appearance-none cursor-pointer text-[var(--color-brand-light)]"
                              >
                                <option value="" disabled>
-                                 {combinedValidSlots.length === 0
-                                   ? 'No open slots on this date'
-                                   : 'Select time...'}
+                                 Select time...
                                </option>
-                               {bookSlots.length > 0 ? (
-                                 <>
-                                   <optgroup label="Regular Scheduled Hours">
-                                     {bookSlots.map(time => (
-                                       <option key={time} value={time}>{formatTime(time)}</option>
-                                     ))}
-                                   </optgroup>
-                                   {outsideSlots.length > 0 && (
-                                     <optgroup label="Outside Scheduled Hours (Squeeze-In / Exception)">
-                                       {outsideSlots.map(time => (
-                                         <option key={time} value={time}>{formatTime(time)}</option>
-                                       ))}
-                                     </optgroup>
-                                   )}
-                                 </>
-                               ) : (
-                                 allCollisionFreeSlots.map(time => (
-                                   <option key={time} value={time}>{formatTime(time)}</option>
-                                 ))
+                               {bookSlots.length > 0 && (
+                                 <optgroup label="Regular Scheduled Hours">
+                                   {bookSlots.map(time => (
+                                     <option key={time} value={time}>{formatTime(time)}</option>
+                                   ))}
+                                 </optgroup>
+                               )}
+                               {outsideSlots.length > 0 && (
+                                 <optgroup label="Outside Scheduled Hours (Squeeze-In / Exception)">
+                                   {outsideSlots.map(time => (
+                                     <option key={time} value={time}>{formatTime(time)}</option>
+                                   ))}
+                                 </optgroup>
+                               )}
+                               {occupiedSlots.length > 0 && (
+                                 <optgroup label="Occupied / Conflict Slots (Double-Book Override)">
+                                   {occupiedSlots.map(time => (
+                                     <option key={time} value={time}>{formatTime(time)} (Occupied)</option>
+                                   ))}
+                                 </optgroup>
                                )}
                              </select>
-                             {bookServices.length > 0 && combinedValidSlots.length === 0 && (
-                               <p className="text-xs text-red-500 font-semibold mt-1.5">
-                                 No collision-free {bookTotalDurationMinutes}m slots left on {formatDisplayDate(bookDate)}.
-                               </p>
-                             )}
                            </>
                          )
                        })()}
@@ -4149,21 +4703,13 @@ export default function AdminDashboard() {
                         </div>
                      </div>
 
-                     {(() => {
-                       const combinedValidSlots = bookSlots.length > 0
-                         ? [...bookSlots, ...allCollisionFreeSlots.filter(t => !bookSlots.includes(t))]
-                         : allCollisionFreeSlots
-
-                       return (
-                         <button
-                           type="submit"
-                           disabled={isBooking || !bookTime || !combinedValidSlots.includes(bookTime) || bookServices.length === 0 || !clientName || !clientPhone}
-                           className="w-full bg-[var(--color-brand-accent)] text-white font-bold p-3 rounded-xl mt-4 cursor-pointer disabled:opacity-50 hover:not-disabled:brightness-110 transition-all"
-                         >
-                           {isBooking ? 'Booking...' : 'Confirm Appointment'}
-                         </button>
-                       )
-                     })()}
+                     <button
+                       type="submit"
+                       disabled={isBooking || !bookTime || bookServices.length === 0 || !clientName || !clientPhone}
+                       className="w-full bg-[var(--color-brand-accent)] text-white font-bold p-3 rounded-xl mt-4 cursor-pointer disabled:opacity-50 hover:not-disabled:brightness-110 transition-all"
+                     >
+                       {isBooking ? 'Booking...' : 'Confirm Appointment'}
+                     </button>
                    </>
                  ) : (
                    <>
@@ -4191,29 +4737,36 @@ export default function AdminDashboard() {
                        </div>
                      </div>
 
-                     <div className="flex items-center justify-between gap-3 p-3.5 rounded-xl bg-[var(--color-brand-900)]/80 border border-[var(--color-brand-700)]">
-                       <div className="min-w-0">
-                         <div className="text-sm font-bold text-[var(--color-brand-light)]">Repeating</div>
-                         <div className="text-xs text-[var(--color-brand-muted)] leading-snug mt-0.5">
-                           Auto-block this exact time window across all working days (next 8 weeks).
+                     {(() => {
+                       const { formattedCutoff, totalDaysInRange } = getEndOfWeekSundayInfo(bookDate)
+                       return (
+                         <div className="flex items-center justify-between gap-3 p-3.5 rounded-xl bg-[var(--color-brand-900)]/80 border border-[var(--color-brand-700)]">
+                           <div className="min-w-0">
+                             <div className="text-sm font-bold text-[var(--color-brand-light)]">
+                               Repeat through end of week ({formattedCutoff})
+                             </div>
+                             <div className="text-xs text-[var(--color-brand-muted)] leading-snug mt-0.5">
+                               Auto-block this exact time window on working days through {formattedCutoff} ({totalDaysInRange} {totalDaysInRange === 1 ? 'day' : 'days'} in current week).
+                             </div>
+                           </div>
+                           <button
+                             type="button"
+                             role="switch"
+                             aria-checked={isRepeatingBlockout}
+                             onClick={() => setIsRepeatingBlockout(prev => !prev)}
+                             className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                               isRepeatingBlockout ? 'bg-[var(--color-brand-accent)]' : 'bg-[var(--color-brand-700)]'
+                             }`}
+                           >
+                             <span
+                               className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                                 isRepeatingBlockout ? 'translate-x-5' : 'translate-x-0'
+                               }`}
+                             />
+                           </button>
                          </div>
-                       </div>
-                       <button
-                         type="button"
-                         role="switch"
-                         aria-checked={isRepeatingBlockout}
-                         onClick={() => setIsRepeatingBlockout(prev => !prev)}
-                         className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                           isRepeatingBlockout ? 'bg-[var(--color-brand-accent)]' : 'bg-[var(--color-brand-700)]'
-                         }`}
-                       >
-                         <span
-                           className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                             isRepeatingBlockout ? 'translate-x-5' : 'translate-x-0'
-                           }`}
-                         />
-                       </button>
-                     </div>
+                       )
+                     })()}
 
                      <div className="space-y-1.5 pt-2">
                        <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider">Reason / Notes</label>
@@ -5317,16 +5870,16 @@ export default function AdminDashboard() {
                         style={
                           isOff
                             ? {
-                                backgroundColor: isLight ? 'rgba(23, 15, 46, 0.08)' : 'rgba(4, 2, 8, 0.5)',
+                                backgroundColor: isLight ? 'rgba(23, 15, 46, 0.08)' : '#050308',
                                 backgroundImage: isLight
                                   ? 'repeating-linear-gradient(45deg, transparent, transparent 8px, rgba(23, 15, 46, 0.05) 8px, rgba(23, 15, 46, 0.05) 16px)'
-                                  : 'repeating-linear-gradient(45deg, transparent, transparent 8px, rgba(4, 2, 8, 0.35) 8px, rgba(4, 2, 8, 0.35) 16px)'
+                                  : 'repeating-linear-gradient(-45deg, rgba(255, 255, 255, 0.045) 0px, rgba(255, 255, 255, 0.045) 4px, transparent 4px, transparent 10px)'
                               }
                             : undefined
                         }
                         className={`px-0.5 py-1.5 sm:p-2 text-center border-r border-[var(--color-brand-700)]/60 hover:bg-[var(--color-brand-accent)]/15 transition-colors cursor-pointer group min-w-0 overflow-hidden relative ${
                           isToday ? 'bg-[var(--color-brand-accent)]/10' : ''
-                        } ${isOff ? 'opacity-75' : ''}`}
+                        } ${isOff ? (isLight ? 'opacity-75' : 'text-[var(--color-brand-muted)]/70') : ''}`}
                       >
                         <div className="flex items-center justify-center gap-1 min-w-0">
                           <span className={`text-[9px] sm:text-[10px] uppercase font-bold tracking-tight truncate ${
@@ -5336,14 +5889,14 @@ export default function AdminDashboard() {
                           </span>
                           {isOff && (
                             <span className={`text-[8px] font-bold px-1 rounded border leading-tight ${
-                              isLight ? 'text-[#991B1B] bg-[#E6CCD2] border-[#B91C1C]/40' : 'text-red-400 bg-red-950/70 border-red-800/60'
+                              isLight ? 'text-[#991B1B] bg-[#E6CCD2] border-[#B91C1C]/40' : 'text-red-300 bg-red-950/85 border-red-700/80'
                             }`}>
                               OFF
                             </span>
                           )}
                         </div>
                         <div className={`text-xs sm:text-base font-bold truncate ${
-                          isToday ? 'text-[var(--color-brand-accent)]' : isSelected ? 'text-[var(--color-brand-light)] underline' : 'text-[var(--color-brand-light)]'
+                          isToday ? 'text-[var(--color-brand-accent)]' : isSelected ? 'text-[var(--color-brand-light)] underline' : (isOff && !isLight ? 'text-[var(--color-brand-muted)]/60' : 'text-[var(--color-brand-light)]')
                         }`}>
                           {d.getDate()}
                         </div>
@@ -5421,29 +5974,37 @@ export default function AdminDashboard() {
                       style={
                         isOff
                           ? {
-                              backgroundColor: isLight ? 'rgba(23, 15, 46, 0.08)' : 'rgba(4, 2, 8, 0.65)',
+                              backgroundColor: isLight ? 'rgba(23, 15, 46, 0.08)' : '#050308',
                               backgroundImage: isLight
                                 ? 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(23, 15, 46, 0.05) 10px, rgba(23, 15, 46, 0.05) 20px)'
-                                : 'repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(35, 18, 66, 0.35) 10px, rgba(35, 18, 66, 0.35) 20px)'
+                                : 'repeating-linear-gradient(-45deg, rgba(255, 255, 255, 0.045) 0px, rgba(255, 255, 255, 0.045) 4px, transparent 4px, transparent 10px)'
                             }
                           : undefined
                       }
-                      className={`bg-[var(--color-brand-900)] hover:bg-[var(--color-brand-800)]/70 transition-colors p-1.5 sm:p-2 min-h-[90px] sm:min-h-[110px] flex flex-col items-start text-left relative group cursor-pointer overflow-hidden ${
+                      className={`${
+                        isLight
+                          ? 'bg-[var(--color-brand-900)] hover:bg-[var(--color-brand-800)]/70'
+                          : isOff
+                          ? 'bg-[#050308] hover:bg-[#120924]'
+                          : 'bg-[#170C2E] hover:bg-[var(--color-brand-800)]/90'
+                      } transition-colors p-1.5 sm:p-2 min-h-[90px] sm:min-h-[110px] flex flex-col items-start text-left relative group cursor-pointer overflow-hidden ${
                         isToday ? 'ring-1 ring-inset ring-[var(--color-brand-accent)]' : ''
-                      } ${isOff ? 'opacity-70' : ''}`}
+                      } ${isOff && isLight ? 'opacity-70' : ''}`}
                     >
                       {/* Date Header */}
                       <div className="w-full flex items-center justify-between">
                         <span className={`text-xs sm:text-sm font-bold flex items-center justify-center w-6 h-6 rounded-full ${
                           isToday
                             ? 'bg-[var(--color-brand-accent)] text-white shadow-sm'
+                            : isOff && !isLight
+                            ? 'text-[var(--color-brand-muted)]/60 group-hover:text-[var(--color-brand-light)]'
                             : 'text-[var(--color-brand-light)] group-hover:text-[var(--color-brand-accent)]'
                         }`}>
                           {date.getDate()}
                         </span>
                         {isOff && (
-                          <span className={`text-[9px] font-bold px-1 rounded border ${
-                            isLight ? 'text-[#991B1B] bg-[#E6CCD2] border-[#B91C1C]/40' : 'text-red-400 bg-red-950/60 border-red-800/60'
+                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${
+                            isLight ? 'text-[#991B1B] bg-[#E6CCD2] border-[#B91C1C]/40' : 'text-red-300 bg-red-950/85 border-red-700/80 shadow-sm'
                           }`}>
                             OFF
                           </span>
