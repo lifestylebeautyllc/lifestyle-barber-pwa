@@ -65,7 +65,10 @@ export default function BarberCalendar() {
     const [isAddingMoreServices, setIsAddingMoreServices] = useState(false)
     const [lineupPulse, setLineupPulse] = useState(false)
     const lineupCardRef = useRef<HTMLDivElement | null>(null)
+    const pageContainerRef = useRef<HTMLDivElement | null>(null)
     const lineupPulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    const isSelectingServiceRef = useRef(false)
+    const selectTapLockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const [selectedDate, setSelectedDate] = useState(() => getLocalTodayStr())
 
     const totalDurationMinutes = selectedServices.reduce((sum, s) => sum + s.duration_minutes, 0)
@@ -155,6 +158,24 @@ export default function BarberCalendar() {
         setSelectedTimeGroup(null)
         setSelectedSlot(null)
     }, [selectedServices])
+
+    // Post-render iOS Safari-safe scroll-to-top snap whenever selectedServices.length or active booking step changes
+    useEffect(() => {
+        const forceScrollTop = () => {
+            window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
+            document.documentElement.scrollTop = 0
+            document.body.scrollTop = 0
+            if (pageContainerRef.current) {
+                pageContainerRef.current.scrollTop = 0
+            }
+        }
+        const rafId = requestAnimationFrame(forceScrollTop)
+        const timerId = window.setTimeout(forceScrollTop, 50)
+        return () => {
+            cancelAnimationFrame(rafId)
+            window.clearTimeout(timerId)
+        }
+    }, [selectedServices.length, isAddingMoreServices, selectedSlot, selectedTimeGroup])
 
     // 2. Load Slots: Calculates Math for One Barber OR Scans Entire Shop (+ 14-day auto-scan on service select)
     useEffect(() => {
@@ -466,7 +487,10 @@ export default function BarberCalendar() {
     }
 
     return (
-        <div className="min-h-screen bg-[var(--color-brand-900)] text-[var(--color-brand-light)] font-sans flex flex-col p-6 max-w-md mx-auto">
+        <div
+            ref={pageContainerRef}
+            className="min-h-screen bg-[var(--color-brand-900)] text-[var(--color-brand-light)] font-sans flex flex-col p-6 max-w-md mx-auto"
+        >
             <header className="flex items-center justify-between gap-3 mb-8 pt-4">
                 <div className="flex items-center gap-3.5 min-w-0">
                     <button
@@ -521,33 +545,40 @@ export default function BarberCalendar() {
                             </div>
 
                             <div className="space-y-2">
-                                {selectedServices.map((svc, idx) => (
-                                    <div
-                                        key={`${svc.id}-${idx}`}
-                                        className="flex items-center justify-between gap-2 bg-[var(--color-brand-900)]/60 border border-[var(--color-brand-700)]/70 px-3.5 py-2.5 rounded-xl"
-                                    >
-                                        <div className="min-w-0">
-                                            <p className="text-sm font-bold text-[var(--color-brand-light)] truncate">{svc.name}</p>
-                                            <p className="text-xs text-[var(--color-brand-muted)]">
-                                                {svc.duration_minutes} mins • <span className="text-[var(--color-brand-gold)] font-semibold">${svc.price}</span>
-                                            </p>
-                                        </div>
-                                        <button
-                                            type="button"
-                                            aria-label={`Remove ${svc.name}`}
-                                            onClick={() => {
-                                                setSelectedServices(prev => {
-                                                    const next = prev.filter((_, i) => i !== idx)
-                                                    if (next.length === 0) setIsAddingMoreServices(false)
-                                                    return next
-                                                })
-                                            }}
-                                            className="p-1.5 rounded-lg text-[var(--color-brand-muted)] hover:text-red-400 hover:bg-red-500/15 transition-colors cursor-pointer flex-shrink-0"
+                                {selectedServices.map((svc, idx) => {
+                                    const isLatestAdded = idx === selectedServices.length - 1 && lineupPulse
+                                    return (
+                                        <div
+                                            key={`${svc.id}-${idx}`}
+                                            className={`flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-xl border transition-all duration-300 ${
+                                                isLatestAdded
+                                                    ? 'bg-[var(--color-brand-accent)]/20 border-[var(--color-brand-gold)] ring-1 ring-[var(--color-brand-gold)]/70'
+                                                    : 'bg-[var(--color-brand-900)]/60 border border-[var(--color-brand-700)]/70'
+                                            }`}
                                         >
-                                            <X className="w-4 h-4" />
-                                        </button>
-                                    </div>
-                                ))}
+                                            <div className="min-w-0">
+                                                <p className="text-sm font-bold text-[var(--color-brand-light)] truncate">{svc.name}</p>
+                                                <p className="text-xs text-[var(--color-brand-muted)]">
+                                                    {svc.duration_minutes} mins • <span className="text-[var(--color-brand-gold)] font-semibold">${svc.price}</span>
+                                                </p>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                aria-label={`Remove ${svc.name}`}
+                                                onClick={() => {
+                                                    setSelectedServices(prev => {
+                                                        const next = prev.filter((_, i) => i !== idx)
+                                                        if (next.length === 0) setIsAddingMoreServices(false)
+                                                        return next
+                                                    })
+                                                }}
+                                                className="p-1.5 rounded-lg text-[var(--color-brand-muted)] hover:text-red-400 hover:bg-red-500/15 transition-colors cursor-pointer flex-shrink-0"
+                                            >
+                                                <X className="w-4 h-4" />
+                                            </button>
+                                        </div>
+                                    )
+                                })}
                             </div>
 
                             <button
@@ -573,10 +604,18 @@ export default function BarberCalendar() {
                         <button
                             key={service.id}
                             onClick={() => {
+                                if (isSelectingServiceRef.current) return
+                                isSelectingServiceRef.current = true
+                                if (selectTapLockTimerRef.current) {
+                                    clearTimeout(selectTapLockTimerRef.current)
+                                }
+                                selectTapLockTimerRef.current = setTimeout(() => {
+                                    isSelectingServiceRef.current = false
+                                }, 350)
+
                                 setSelectedServices(prev => [...prev, service])
                                 setIsAddingMoreServices(true)
                                 setSelectedTimeGroup(null)
-                                window.scrollTo({ top: 0, behavior: 'smooth' })
                                 if (lineupPulseTimerRef.current) {
                                     clearTimeout(lineupPulseTimerRef.current)
                                 }
