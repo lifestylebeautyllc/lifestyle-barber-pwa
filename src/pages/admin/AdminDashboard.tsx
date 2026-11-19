@@ -279,6 +279,9 @@ export default function AdminDashboard() {
   const [clientPhone, setClientPhone] = useState('')
   const [bookNotes, setBookNotes] = useState('')
   const [isBooking, setIsBooking] = useState(false)
+  const [showExistingClientPicker, setShowExistingClientPicker] = useState(false)
+  const [clientSearchQuery, setClientSearchQuery] = useState('')
+  const [selectedExistingClient, setSelectedExistingClient] = useState<Client | null>(null)
 
   const bookTotalDurationMinutes = bookServices.reduce((sum, s) => sum + (Number(s?.duration_minutes) || 0), 0)
   const bookTotalPrice = bookServices.reduce((sum, s) => sum + (Number(s?.price) || 0), 0)
@@ -619,6 +622,9 @@ export default function AdminDashboard() {
   // Gate helper: checks if target date/time is outside working hours before opening Manual Book modal
   const requestOpenBookingModal = (targetDate: string, targetTime = '', overridesHint?: any[]) => {
     setBookServices([])
+    setSelectedExistingClient(null)
+    setShowExistingClientPicker(false)
+    setClientSearchQuery('')
     setIsRepeatingBlockout(false)
     if (targetTime) {
       setBlockEndTime(minutesToTime(toMinutes(targetTime) + 60))
@@ -1391,6 +1397,9 @@ export default function AdminDashboard() {
       setClientName('')
       setClientPhone('')
       setBookNotes('')
+      setSelectedExistingClient(null)
+      setShowExistingClientPicker(false)
+      setClientSearchQuery('')
       setRefreshTrigger(prev => prev + 1)
     } catch (error: any) {
       console.error(error)
@@ -1734,6 +1743,65 @@ export default function AdminDashboard() {
       setEditApptNotes(rawNotes)
     }
     setEditApptMode(true)
+  }
+
+  const handleRebookClient = () => {
+    if (!selectedAppt) return
+    const clientObj = selectedAppt.clients
+    const rawClientName = clientObj?.name && clientObj.name !== 'Walk-In' && clientObj.name !== 'Blocked'
+      ? clientObj.name
+      : ''
+    const rawClientPhone = clientObj?.phone && clientObj.phone !== '0000000000'
+      ? formatPhoneNumber(clientObj.phone)
+      : ''
+
+    const rawNotes = selectedAppt.notes || ''
+    const multiMatch = rawNotes.match(/^\[Services:\s*(.+?)\s*\(\$[\d.]+\)\](?:\s*-\s*|\s*)(.*)$/s)
+    let matchedServices: any[] = []
+    let cleanApptNotes = rawNotes
+
+    if (multiMatch) {
+      const parsedNames = multiMatch[1].split(/\s*\+\s*/).map((n: string) => n.trim()).filter(Boolean)
+      matchedServices = parsedNames
+        .map((name: string) => adminServices.find(s => s.name.toLowerCase() === name.toLowerCase()))
+        .filter(Boolean)
+      cleanApptNotes = multiMatch[2] || ''
+    }
+
+    if (matchedServices.length === 0) {
+      const byId = selectedAppt.service_id
+        ? adminServices.find(s => s.id === selectedAppt.service_id)
+        : null
+      const byName = !byId && selectedAppt.services?.name
+        ? adminServices.find(s => s.name.toLowerCase() === selectedAppt.services.name.toLowerCase())
+        : null
+      if (byId) {
+        matchedServices = [byId]
+      } else if (byName) {
+        matchedServices = [byName]
+      } else if (selectedAppt.services) {
+        matchedServices = [selectedAppt.services]
+      }
+    }
+
+    const prefilledNotes = (cleanApptNotes || clientObj?.notes || '').trim()
+
+    setShowApptModal(false)
+    setEditApptMode(false)
+    setIsBlockoutMode(false)
+    setIsRepeatingBlockout(false)
+    setShowExistingClientPicker(false)
+    setClientSearchQuery('')
+    setSelectedExistingClient(
+      clientObj && clientObj.phone && clientObj.phone !== '0000000000' ? clientObj : null
+    )
+    setClientName(rawClientName)
+    setClientPhone(rawClientPhone)
+    setBookNotes(prefilledNotes)
+    setBookServices(matchedServices)
+    setBookDate(selectedDate)
+    setBookTime('')
+    setShowBookModal(true)
   }
 
   const handleSaveEditedAppointment = async (e: React.FormEvent) => {
@@ -3587,6 +3655,17 @@ export default function AdminDashboard() {
                    <label className="block text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider mb-3">
                      {selectedAppt.is_blockout ? 'Manage Blockout' : 'Update Status'}
                    </label>
+                   {!selectedAppt.is_blockout && (
+                     <button
+                       type="button"
+                       onClick={handleRebookClient}
+                       disabled={isUpdatingAppt}
+                       className="w-full py-3 rounded-xl border border-[var(--color-brand-gold)]/70 bg-[var(--color-brand-accent)]/20 hover:bg-[var(--color-brand-accent)] text-[var(--color-brand-light)] hover:text-white text-xs sm:text-sm font-bold transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2 shadow-sm mb-2"
+                     >
+                       <Calendar className="w-4 h-4 text-[var(--color-brand-gold)]" />
+                       <span>Rebook Client</span>
+                     </button>
+                   )}
                    <div className={selectedAppt.is_blockout ? 'grid grid-cols-1 gap-2' : 'grid grid-cols-3 gap-2'}>
                      {!selectedAppt.is_blockout && (
                        <button
@@ -3705,6 +3784,9 @@ export default function AdminDashboard() {
                     setBookNotes('')
                     setClientName('')
                     setClientPhone('')
+                    setSelectedExistingClient(null)
+                    setShowExistingClientPicker(false)
+                    setClientSearchQuery('')
                   }}
                   className="text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer"
                 >
@@ -3884,6 +3966,136 @@ export default function AdminDashboard() {
                      </div>
 
                      <div className="space-y-3 pt-4 border-t border-[var(--color-brand-700)]">
+                        {/* SELECT EXISTING CLIENT FROM DIRECTORY */}
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-bold text-[var(--color-brand-muted)] uppercase tracking-wider">
+                              Client Details
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setShowExistingClientPicker(prev => !prev)}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold border border-[var(--color-brand-periwinkle)]/60 bg-[var(--color-brand-periwinkle)]/15 text-[var(--color-brand-periwinkle)] hover:bg-[var(--color-brand-periwinkle)] hover:text-white transition-all cursor-pointer"
+                            >
+                              <Users className="w-3.5 h-3.5" />
+                              <span>{showExistingClientPicker ? 'Close Directory' : 'Select Existing Client'}</span>
+                            </button>
+                          </div>
+
+                          {selectedExistingClient && (
+                            <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-[var(--color-brand-periwinkle)]/15 border border-[var(--color-brand-periwinkle)]/60">
+                              <div className="min-w-0 flex items-center gap-2">
+                                <User className="w-3.5 h-3.5 text-[var(--color-brand-periwinkle)] flex-shrink-0" />
+                                <div className="min-w-0">
+                                  <p className="text-xs font-bold text-[var(--color-brand-light)] truncate">
+                                    {selectedExistingClient.name}{' '}
+                                    <span className="font-mono font-normal text-[var(--color-brand-muted)]">
+                                      ({formatPhoneNumber(selectedExistingClient.phone)})
+                                    </span>
+                                  </p>
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                title="Clear selected client"
+                                aria-label="Clear selected client"
+                                onClick={() => {
+                                  setSelectedExistingClient(null)
+                                  setClientName('')
+                                  setClientPhone('')
+                                  setBookNotes('')
+                                }}
+                                className="p-1 rounded-lg text-[var(--color-brand-muted)] hover:text-red-400 hover:bg-red-500/15 transition-colors cursor-pointer flex-shrink-0"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          )}
+
+                          {showExistingClientPicker && (() => {
+                            const q = clientSearchQuery.trim().toLowerCase()
+                            const qDigits = clientSearchQuery.replace(/\D/g, '')
+                            const directoryMatches = clientsList
+                              .filter(c => {
+                                if (!c.phone || c.phone === '0000000000') return false
+                                if (!q) return true
+                                const nameMatches = (c.name || '').toLowerCase().includes(q)
+                                const phoneMatches = qDigits.length > 0 && cleanPhone(c.phone).includes(qDigits)
+                                return nameMatches || phoneMatches
+                              })
+                              .slice(0, 40)
+
+                            return (
+                              <div className="bg-[var(--color-brand-900)] border border-[var(--color-brand-700)] rounded-xl p-2.5 space-y-2 shadow-inner">
+                                <div className="relative">
+                                  <Search className="w-3.5 h-3.5 text-[var(--color-brand-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
+                                  <input
+                                    type="text"
+                                    value={clientSearchQuery}
+                                    onChange={(e) => setClientSearchQuery(e.target.value)}
+                                    placeholder="Search clients by name or phone..."
+                                    className="w-full bg-[var(--color-brand-800)] border border-[var(--color-brand-700)] rounded-lg py-2 pl-8 pr-7 text-xs text-[var(--color-brand-light)] outline-none focus:border-[var(--color-brand-periwinkle)]"
+                                  />
+                                  {clientSearchQuery && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setClientSearchQuery('')}
+                                      className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--color-brand-muted)] hover:text-[var(--color-brand-light)] cursor-pointer"
+                                    >
+                                      <X className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                </div>
+
+                                <div className="max-h-44 overflow-y-auto space-y-1 pr-0.5">
+                                  {directoryMatches.length === 0 ? (
+                                    <p className="text-xs text-[var(--color-brand-muted)] text-center py-3 italic">
+                                      No matching clients found.
+                                    </p>
+                                  ) : (
+                                    directoryMatches.map(c => (
+                                      <button
+                                        key={c.id}
+                                        type="button"
+                                        onClick={() => {
+                                          setSelectedExistingClient(c)
+                                          setClientName(c.name)
+                                          setClientPhone(formatPhoneNumber(c.phone))
+                                          if (!bookNotes.trim() && c.notes) {
+                                            setBookNotes(c.notes)
+                                          }
+                                          setShowExistingClientPicker(false)
+                                          setClientSearchQuery('')
+                                        }}
+                                        className="w-full text-left px-2.5 py-2 rounded-lg bg-[var(--color-brand-800)]/80 hover:bg-[var(--color-brand-accent)]/20 border border-transparent hover:border-[var(--color-brand-accent)]/50 transition-all cursor-pointer flex flex-col gap-0.5"
+                                      >
+                                        <div className="flex items-center justify-between gap-2">
+                                          <span className="text-xs font-bold text-[var(--color-brand-light)] truncate">
+                                            {c.name}
+                                          </span>
+                                          <span className="text-[11px] font-mono text-[var(--color-brand-muted)] flex-shrink-0">
+                                            {formatPhoneNumber(c.phone)}
+                                          </span>
+                                        </div>
+                                        {c.is_red_listed && (
+                                          <span className="inline-flex items-center w-fit text-[9px] font-extrabold bg-red-600 text-white px-1.5 py-0.5 rounded mt-0.5">
+                                            🚩 RED LIST • OWES {(c.red_listed_by || 'SHOP').toUpperCase()}
+                                          </span>
+                                        )}
+                                        {c.notes && (
+                                          <p className="text-[11px] text-[var(--color-brand-muted)] truncate italic">
+                                            ✂️ {c.notes}
+                                          </p>
+                                        )}
+                                      </button>
+                                    ))
+                                  )}
+                                </div>
+                              </div>
+                            )
+                          })()}
+                        </div>
+
                         {(() => {
                           const cleanedBookPhone = cleanPhone(clientPhone)
                           const trimmedBookName = clientName.trim().toLowerCase()
